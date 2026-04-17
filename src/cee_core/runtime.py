@@ -251,21 +251,27 @@ def execute_task_in_domain(
     # Precedent Memory Retrieval (if memory_store provided)
     precedent_context: List[RetrievalResult] = []
     if memory_store is not None:
-        retriever = Retriever(memory_store=memory_store)
+        from .memory_index import MemoryIndex
+        memory_index = MemoryIndex(memory_store)
+        memory_index.build_index_from_store()  # Build index from existing memories
+        retriever = Retriever(memory_index=memory_index)
         query = RetrievalQuery(
             query_text=raw_input,
             domain_label=domain_context.domain_name,
             limit=5,
         )
-        precedents = retriever.search_precedents(query)
-        precedent_context = precedents.results
+        precedent_context = retriever.search_precedents(query)
         if precedent_context:
             log.append(DeliberationEvent(
                 reasoning_step=ReasoningStep(
-                    observation=f"Retrieved {len(precedent_context)} precedent memories",
-                    reasoning=f"Found similar past tasks that may inform current execution",
-                    alternatives=[f"Precedent: {p.content[:100]}" for p in precedent_context[:3]],
+                    task_id=task.task_id,
+                    summary=f"Retrieved {len(precedent_context)} precedent memories",
+                    hypothesis=f"Found similar past tasks that may inform current execution",
+                    missing_information=(),
+                    candidate_actions=(),
                     chosen_action="execute_plan",
+                    rationale=f"Using {len(precedent_context)} precedents for context",
+                    stop_condition="retrieval_complete",
                 ),
             ))
     
@@ -279,31 +285,34 @@ def execute_task_in_domain(
     )
     
     # Uncertainty Routing (if router provided)
-    routing_decision: Optional[RoutingDecision] = None
+    routing_result: Optional[RoutingResult] = None
     if router is not None:
+        risk_level_value = task.risk_level.value if hasattr(task.risk_level, 'value') else task.risk_level
         signals = RoutingSignals(
             evidence_coverage=0.7 if not precedent_context else 0.9,
             precedent_similarity=0.5,
-            tool_risk_level=task.risk_level.value,
+            tool_risk_level=risk_level_value,
             historical_success_rate=0.8,
             model_self_confidence=0.75,
         )
         routing_result = router.route(signals)
-        routing_decision = routing_result.decision
         
         # Record routing decision to event log
         log.append(DeliberationEvent(
             reasoning_step=ReasoningStep(
-                observation=f"Uncertainty routing: {routing_decision.decision.value}",
-                reasoning=routing_decision.reasoning,
-                alternatives=[],
-                chosen_action=routing_decision.decision.value,
-                confidence=routing_decision.confidence,
+                task_id=task.task_id,
+                summary=f"Uncertainty routing decision: {routing_result.decision.value}",
+                hypothesis=routing_result.reasoning,
+                missing_information=(),
+                candidate_actions=(),
+                chosen_action="execute_plan",
+                rationale=routing_result.reasoning,
+                stop_condition="routing_complete",
             ),
         ))
         
         # Adjust approval strategy based on routing decision
-        if routing_decision.decision.value == "needs_human_review":
+        if routing_result.decision == RoutingDecision.NEEDS_HUMAN_REVIEW:
             # Force approval for high-uncertainty tasks
             approval_gate = approval_gate or ApprovalGate()
     
