@@ -1,0 +1,570 @@
+好，只展开 **CEE 的“precedent memory + uncertainty router”组合**。
+我把它定义成一个很具体的底座：
+
+> **precedent memory** 负责把“过去哪些状态转移、在什么证据下、以什么结果结束”沉淀成可检索对象；
+> **uncertainty router** 负责把“当前这次该不该自动执行、该不该补证、该不该升级审批”做成显式决策。
+
+这两个东西拼在一起，才会让 CEE 从“有状态的执行框架”变成“会利用经验、也会承认不确定性”的系统。Letta 已经证明了“始终可见的核心记忆”和“按需检索的外部记忆”是有价值的分层；LangGraph 证明了 checkpoint、thread、replay、人类中断恢复这些运行时能力是 agent 工程的底座；Anthropic 说明传统 RAG 常因切块时丢失上下文而影响检索，contextual retrieval 能显著改善这一步；OpenAI 的 function calling 和 Structured Outputs 则把“模型提议”和“系统执行”之间的结构化接口做得更可靠。([Letta Docs][1])
+
+---
+
+## 1）它解决的核心问题
+
+它解决的不是“模型记不住东西”这么浅的问题，而是三个更深的问题。
+
+第一，**系统不会真正利用历史经验**。
+现在很多系统即使有日志，也只是把过去当成“可读文本”。但 CEE 需要的不是“历史对话”，而是“历史状态转移先例”：某种任务、某种证据、某种风险、某种审批结果，最后导致了什么结局。Letta 的 archival memory 已经说明，外部长期记忆适合存事实和历史信息，但它默认仍是语义可检索存储；你的突破点是把它升级成“可执行先例对象”。([Letta Docs][2])
+
+第二，**系统不会诚实地区分确定与不确定**。
+普通 tool-calling agent 往往能提出动作，却很少有一层显式模块把“证据是否足够”“风险是否过高”“历史是否支持自动执行”变成路由决策。NIST 的 Generative AI Profile 强调 trustworthiness、risk management、evaluation 与 traceability，这正说明“能生成答案”不等于“可以被授权执行”。([NIST][3])
+
+第三，**检索和执行没有闭环**。
+Anthropic 对 Contextual Retrieval 的讨论指出，传统 RAG 会在编码时丢失上下文，导致检索命中不稳。即使检索到了内容，若这些内容不能进入“执行/补证/审批”路由，它也只是更高级的参考资料，而不是执行底座。([Anthropic][4])
+
+---
+
+## 2）为什么是当前 CEE 最缺的底座
+
+因为你现在的 CEE 已经有：
+
+* 显式状态
+* 事件日志
+* 策略引擎
+* 审批边界
+* 域插件
+* 假设验证 / 推理链
+
+但还缺一层把这些东西真正“粘起来”的中间底座：
+
+> **过去的经验如何进入当前判断**
+> **当前判断如何带着不确定性去决定执行权**
+
+没有 precedent memory，CEE 会退化成“每次都重新思考的系统”；
+没有 uncertainty router，CEE 会退化成“规则审批 + 手工阈值”的系统。
+
+LangGraph 更偏“运行时持久化与恢复”；Letta 更偏“内外记忆分层”；Anthropic 更偏“检索质量”；OpenAI 更偏“结构化调用接口”。你的 CEE 现在最缺的，就是把这几者中间的空白补上：**先例利用 + 不确定性路由**。([LangChain 文档][5])
+
+---
+
+## 3）状态层怎么接
+
+这一步最重要的原则是：
+
+> **precedent memory 不是规范状态本身；
+> 它是状态演化的外部经验层。**
+
+我建议你把状态层拆成三块：
+
+### A. 规范状态 `State`
+
+仍然保留你现在的主干：
+
+* `memory`
+* `goals`
+* `beliefs`
+* `self_model`
+* `meta`
+* `tool_affordances`
+
+这部分仍然由 reducer、policy、approval 管。
+
+### B. 先例记忆索引 `PrecedentIndex`
+
+它不直接写进 `State`，而是作为可查询外部层存在。
+State 里只保留少量“当前已选用先例”的引用，例如：
+
+```python
+state.meta.active_precedent_ids: tuple[str, ...]
+state.meta.precedent_query_summary: str | None
+state.meta.precedent_confidence: float | None
+```
+
+也就是说，State 里只放：
+
+* 当前用到了哪些先例
+* 这些先例对当前任务的影响摘要
+* 用它们得出的置信度摘要
+
+### C. 路由状态 `DecisionEnvelope`
+
+这是 uncertainty router 的结果包，建议也进入状态或事件中：
+
+```python
+route = {
+    "decision": "auto_execute | needs_more_evidence | needs_human_review | block",
+    "confidence": 0.0-1.0,
+    "risk_score": 0.0-1.0,
+    "evidence_coverage": 0.0-1.0,
+    "precedent_support": 0.0-1.0,
+    "reasons": [...],
+}
+```
+
+然后把它写入事件日志，而不是偷偷只存在运行时变量里。
+这会直接增强 replay 和审计能力，和 LangGraph 的 step/checkpoint 思路是一致的，只是你的状态语义更强。([LangChain 文档][5])
+
+---
+
+## 4）数据结构怎么设计
+
+我建议你用 4 个核心对象。
+
+### 4.1 `PrecedentMemoryRecord`
+
+```python
+@dataclass(frozen=True)
+class PrecedentMemoryRecord:
+    precedent_id: str
+    domain: str
+    task_signature: str
+    task_type: str
+    created_at: str
+
+    initial_state_fingerprint: str
+    final_state_fingerprint: str
+    state_diff_summary: str
+
+    evidence_refs: tuple[str, ...]
+    evidence_coverage: float
+
+    tool_sequence: tuple[str, ...]
+    policy_outcome: str
+    approval_outcome: str | None
+
+    final_result: str
+    success: bool
+    failure_mode: str | None
+
+    semantic_summary: str
+    tags: tuple[str, ...]
+    embedding_vector_id: str | None
+```
+
+#### 设计原则
+
+* `task_signature`：用于粗粒度匹配任务类型
+* `state_diff_summary`：不是只存结果，还存“改了什么”
+* `policy_outcome / approval_outcome`：先例必须知道当年是怎么被授权的
+* `failure_mode`：失败先例和成功先例一样有价值
+* `semantic_summary`：供 embedding / BM25 / reranker 使用
+
+### 4.2 `PrecedentQuery`
+
+```python
+@dataclass(frozen=True)
+class PrecedentQuery:
+    domain: str
+    task_signature: str
+    current_goal: str
+    current_risk_level: str
+    required_tools: tuple[str, ...]
+    state_snapshot_summary: str
+```
+
+### 4.3 `PrecedentMatch`
+
+```python
+@dataclass(frozen=True)
+class PrecedentMatch:
+    precedent_id: str
+    semantic_score: float
+    structural_score: float
+    risk_score: float
+    tool_overlap_score: float
+    final_score: float
+    support_type: str   # supports / warns / contradicts
+    explanation: str
+```
+
+### 4.4 `RouterDecision`
+
+```python
+@dataclass(frozen=True)
+class RouterDecision:
+    decision: str   # auto_execute / needs_more_evidence / needs_human_review / block
+    confidence: float
+    evidence_coverage: float
+    precedent_support: float
+    risk_score: float
+    reasons: tuple[str, ...]
+    selected_precedents: tuple[str, ...]
+```
+
+这里最关键的是：
+**router 不是只给结论，它要把“为什么这样路由”一起输出。**
+OpenAI 的 Structured Outputs 很适合生成这种强类型中间对象，但执行权仍在你系统里，不在模型里。([OpenAI Help Center][6])
+
+---
+
+## 5）检索与打分算法怎么做
+
+这里不要做成“普通向量库 + top-k”就完事。
+我建议用 **三阶段检索 + 一阶段融合**。
+
+### 阶段 1：粗检索
+
+并行两路：
+
+#### 路 1：语义检索
+
+对 `semantic_summary + task_signature + state_snapshot_summary` 做 embedding 检索。
+
+#### 路 2：上下文化 BM25
+
+借鉴 Contextual Retrieval 的思路，不直接索引裸 chunk，而是给每条 precedent 生成一个简短上下文化描述，例如：
+
+* 这是哪个域
+* 任务是什么
+* 涉及什么状态变更
+* 成功还是失败
+* 是否经过审批
+* 失败/成功原因摘要
+
+Anthropic 的核心发现就是：给片段补上下文，再做 embedding/BM25，可显著改善检索质量。([Anthropic][4])
+
+### 阶段 2：结构重排
+
+对粗检索 top-N 做结构分数：
+
+```text
+structural_score =
+  a * task_signature_match
++ b * tool_overlap
++ c * domain_match
++ d * state_shape_match
+```
+
+其中 `state_shape_match` 可以先做简单版：
+
+* 是否涉及相同关键 state keys
+* 是否涉及相同 risk class
+* 是否涉及相同 approval requirement
+
+### 阶段 3：风险重排
+
+把历史先例的风险属性加进来：
+
+```text
+risk_score =
+  bonus(if similar risk and successful)
+  - penalty(if similar risk and failed)
+```
+
+### 阶段 4：最终融合
+
+建议先用可解释线性打分：
+
+```text
+final_score =
+  0.35 * semantic_score
++ 0.30 * structural_score
++ 0.20 * tool_overlap_score
++ 0.15 * risk_score
+```
+
+不要一开始就上复杂模型。
+原因很简单：你现在最需要的是**可解释**，而不是极限效果。
+
+### 输出方式
+
+最终只取 3–5 个 precedent：
+
+* 1 个最支持自动执行的
+* 1 个最像但失败的
+* 1 个最接近当前风险结构的
+* 可选 1 个需要审批的先例
+
+这样 router 不会被海量历史淹没。
+
+---
+
+## 6）路由规则和审批机制怎么接
+
+这是组合里的关键部分。
+
+### 输入信号
+
+uncertainty router 我建议只吃 5 类输入：
+
+1. `evidence_coverage`
+   当前证据是否足以支撑动作
+
+2. `precedent_support`
+   检索回来的先例整体支持度
+
+3. `risk_level`
+   工具与状态变更风险等级
+
+4. `historical_success_rate`
+   同类 precedent 的历史成功率
+
+5. `model_self_confidence`
+   模型对提议本身的自评，但只占小权重
+
+### 路由决策
+
+第一版只保留 4 类：
+
+* `auto_execute`
+* `needs_more_evidence`
+* `needs_human_review`
+* `block`
+
+### 规则建议
+
+先用混合规则，不要直接上复杂分类器。
+
+#### 自动执行
+
+满足：
+
+* `risk_level == low`
+* `evidence_coverage >= 0.75`
+* `precedent_support >= 0.70`
+* 没有强冲突 precedent
+
+#### 补证
+
+满足任一：
+
+* `evidence_coverage < 0.60`
+* precedent 分歧大
+* 模型置信高但证据低
+
+#### 人审
+
+满足任一：
+
+* `risk_level == medium/high`
+* 工具 `requires_approval == True`
+* 结构上类似历史失败案例
+* state diff 触及敏感键
+
+#### 阻断
+
+满足任一：
+
+* risk 很高且无 precedent 支撑
+* policy 已拒绝
+* evidence 与结论直接冲突
+
+### 审批机制怎么接
+
+不要让 router 直接审批。
+应该是：
+
+```text
+RouterDecision -> ApprovalPacket -> HumanApprove -> EventLog
+```
+
+也就是 router 只提出：
+
+* 为什么建议升级
+* 依据哪些 precedent
+* 风险与证据摘要
+
+最后审批依然走你现有的 approval 权威边界。
+
+### 为什么这样设计
+
+这和 MCP 对“工具应由用户控制、高风险动作需要明确授权”的安全思路一致，也符合 NIST 对可追踪、可验证、可治理执行的要求。([NIST][3])
+
+---
+
+## 7）需要新增哪些文件
+
+我建议只新增这 9 个文件，不要更多。
+
+### 核心类型
+
+* `src/cee_core/memory_types.py`
+  放 `PrecedentMemoryRecord / PrecedentQuery / PrecedentMatch`
+
+* `src/cee_core/router_types.py`
+  放 `RouterDecision`
+
+### 存储与索引
+
+* `src/cee_core/memory_store.py`
+  写入 / 更新 / 查询 precedent memory
+
+* `src/cee_core/memory_index.py`
+  embedding、BM25、tag、risk 索引
+
+### 检索与重排
+
+* `src/cee_core/contextualizer.py`
+  生成 precedent 的 contextual summary
+
+* `src/cee_core/retriever.py`
+  粗检索 + 融合
+
+* `src/cee_core/reranker.py`
+  结构重排与风险重排
+
+### 路由
+
+* `src/cee_core/uncertainty_router.py`
+  组合 5 类输入，输出 `RouterDecision`
+
+### 审批衔接
+
+* `src/cee_core/approval_packet.py`
+  将 router 输出包装成人类可审对象
+
+### 需要修改的文件
+
+* `src/cee_core/state.py`
+* `src/cee_core/runtime.py`
+* `src/cee_core/policy.py`
+* `src/cee_core/events.py`
+* `src/cee_core/planner.py`
+* `src/cee_core/deliberation.py`
+
+### 新增测试
+
+* `tests/test_memory_store.py`
+* `tests/test_retriever.py`
+* `tests/test_reranker.py`
+* `tests/test_uncertainty_router.py`
+* `tests/test_approval_packet.py`
+
+---
+
+## 8）1周 / 1月 / 3月实现计划和实验指标
+
+## 1 周：把对象模型与路由边界定死
+
+### 目标
+
+不是做完功能，而是冻结组合的“形”。
+
+### 要做的事
+
+1. 定义 4 个 dataclass
+2. 实现 `memory_store` 的最小写入与读取
+3. 实现 `uncertainty_router` 的输入输出 schema
+4. 定义 approval packet 格式
+5. 把 precedent 引用写入 event log
+
+### 验收指标
+
+* precedent record 字段完整率 ≥ 95%
+* 每个路由决策都有结构化 reasons
+* approval packet 可由人快速读懂
+* replay 时可看见“用了哪些 precedent、为什么被路由成这样”
+
+### 1 周停止条件
+
+出现以下任何一条就先停：
+
+* precedent 仍然只是“文本 + embedding”
+* router 没有显式 reasons
+* 审批包不能一眼看出风险和证据
+* precedents 没进入事件日志
+
+---
+
+## 1 月：做出可跑的 precedent memory + uncertainty router v1
+
+### 目标
+
+让它在现有 `document_analysis` 域里实际参与执行，而不是停在数据结构。
+
+### 要做的事
+
+1. 实现 contextual summary
+2. embedding + BM25 双路粗检索
+3. 结构重排
+4. uncertainty router v1（规则混合）
+5. approval packet 接入现有审批流
+6. 把执行结束后的任务写回 precedent memory
+
+### 1 月指标
+
+重点只看 5 个：
+
+1. `precedent_hit_rate`
+   当前任务是否能找到可用先例
+
+2. `precedent_usage_rate`
+   找到的先例是否真的进入决策
+
+3. `evidence_supported_conclusion_rate`
+   结论是否有证据支撑
+
+4. `review_trigger_precision`
+   升级审批是否大体合理
+
+5. `auto_execute_success_rate`
+   自动执行后是否稳定成功
+
+### 1 月停止条件
+
+* precedent 命中率低得不可用
+* router 比纯风险规则更差
+* approval packet 仍然不能帮助审批
+* precedent 写回机制污染核心状态
+
+---
+
+## 3 月：验证它是不是底座，而不是花哨模块
+
+### 目标
+
+证明这套组合在第二个域也成立，并且优于“无 precedent / 无 router”的 baseline。
+
+### 要做的事
+
+1. 接第二域 `rule_review`
+2. 做 A/B 实验：
+
+   * baseline：普通检索 + 固定审批规则
+   * variant：precedent memory + uncertainty router
+3. 输出报告：
+
+   * 检索收益
+   * 审批收益
+   * 双域迁移收益
+
+### 3 月核心指标
+
+1. **任务成功率提升**
+2. **误拦率下降**
+3. **漏拦率不升高**
+4. **双域迁移成本**
+5. **历史失败重犯率下降**
+6. **有 precedent 的任务平均证据覆盖率是否更高**
+
+### 3 月停止条件
+
+出现任一就应该停：
+
+* precedent memory 没有明显优于普通 RAG
+* router 没有明显优于固定风险审批
+* 第二域需要改核心状态语义才能接
+* 新模块削弱了 replay / audit 能力
+* 系统变复杂了，但指标没有变好
+
+---
+
+## 最后一条判断
+
+如果你只做其中一个，我会说先做 **precedent memory**。
+但如果你做 precedent memory 却不接 uncertainty router，它最后大概率会退化成“更高级的历史检索”。
+
+所以这两个一定要一起做：
+
+> **precedent memory 决定系统会不会利用过去；
+> uncertainty router 决定系统会不会正确使用过去。**
+
+这才是这个组合的真正价值。
+
+下一步最合适的是，我直接给你写出这 4 个 dataclass 和 9 个文件的骨架。
+
+[1]: https://docs.letta.com/guides/agents/memory-blocks/?utm_source=chatgpt.com "Memory blocks (core memory) | Letta Docs"
+[2]: https://docs.letta.com/guides/core-concepts/memory/archival-memory/?utm_source=chatgpt.com "Archival memory | Letta Docs"
+[3]: https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-generative-artificial-intelligence?utm_source=chatgpt.com "Artificial Intelligence Risk Management Framework: Generative Artificial Intelligence Profile | NIST"
+[4]: https://www.anthropic.com/research/contextual-retrieval?utm_source=chatgpt.com "Contextual Retrieval in AI Systems"
+[5]: https://docs.langchain.com/oss/javascript/langgraph/persistence?utm_source=chatgpt.com "Persistence - Docs by LangChain"
+[6]: https://help.openai.com/en/articles/8555517-function-calling-in-the-openai-api%23.eps?utm_source=chatgpt.com "Function Calling in the OpenAI API | OpenAI Help Center"

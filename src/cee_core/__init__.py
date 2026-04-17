@@ -86,6 +86,9 @@ from .llm_provider import (
     LLMProviderRequest,
     LLMProviderResponse,
     StaticLLMProvider,
+    EmbeddingProvider,
+    StaticEmbeddingProvider,
+    get_default_embedding_provider,
 )
 from .narration import render_event_narration
 from .optional_provider import (
@@ -181,6 +184,37 @@ from .tools import (
     build_tool_call_event,
     evaluate_tool_call_policy,
 )
+from .memory_types import PrecedentMemory, MemoryRetrievalResult
+from .retrieval_types import (
+    EvidenceNode,
+    EvidenceEdge,
+    EvidenceGraph,
+    EvidenceNodeType,
+    EvidenceEdgeType,
+    RetrievalQuery,
+)
+from .memory_store import MemoryStore
+from .memory_index import MemoryIndex
+from .contextualizer import Contextualizer, DocumentChunk
+from .retriever import Retriever, RetrievalResult
+from .evidence_graph import EvidenceGraphBuilder, EvidenceGraphAnalyzer
+from .context_restorer import ContextRestorer, RestoredContext, ExecutionStage
+from .uncertainty_router import (
+    UncertaintyRouter,
+    RoutingSignals,
+    RoutingResult,
+    RoutingDecision,
+    RouterConfig,
+)
+from .approval_packet import ApprovalPacket, ApprovalVerdict
+from .ab_testing import (
+    ABTestingFramework,
+    ABExperiment,
+    ExperimentVariant,
+    ExperimentResult,
+    ExperimentAnalysis,
+    ExperimentStatus,
+)
 
 __all__ = [
     "ApprovalAuditEvent",
@@ -241,6 +275,9 @@ __all__ = [
     "GlossaryPack",
     "StaticLLMTaskCompiler",
     "StaticLLMProvider",
+    "EmbeddingProvider",
+    "StaticEmbeddingProvider",
+    "get_default_embedding_provider",
     "TASK_SPEC_JSON_SCHEMA",
     "build_disabled_provider_transport",
     "build_anthropic_compatible_request_body",
@@ -338,4 +375,37 @@ __all__ = [
     "validate_handoff_state",
     "validate_handoff_state_file",
     "validate_primitives",
+    # Plan B new modules
+    "PrecedentMemory",
+    "MemoryRetrievalResult",
+    "EvidenceNode",
+    "EvidenceEdge",
+    "EvidenceGraph",
+    "EvidenceNodeType",
+    "EvidenceEdgeType",
+    "RetrievalQuery",
+    "MemoryStore",
+    "MemoryIndex",
+    "Contextualizer",
+    "DocumentChunk",
+    "Retriever",
+    "RetrievalResult",
+    "EvidenceGraphBuilder",
+    "EvidenceGraphAnalyzer",
+    "ContextRestorer",
+    "RestoredContext",
+    "ExecutionStage",
+    "UncertaintyRouter",
+    "RoutingSignals",
+    "RoutingResult",
+    "RoutingDecision",
+    "RouterConfig",
+    "ApprovalPacket",
+    "ApprovalVerdict",
+    "ABTestingFramework",
+    "ABExperiment",
+    "ExperimentVariant",
+    "ExperimentResult",
+    "ExperimentAnalysis",
+    "ExperimentStatus",
 ]

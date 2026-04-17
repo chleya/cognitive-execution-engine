@@ -21,6 +21,9 @@ class ToolSpec:
     description: str
     risk: ToolRisk
     input_schema: dict[str, Any] = field(default_factory=dict)
+    reversible: bool = False
+    observable_result: bool = True
+    evidence_required: float = 0.0
 
     @property
     def requires_approval(self) -> bool:
