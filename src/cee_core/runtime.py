@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 from .approval import ApprovalGate, ApprovalGateResult
 from .audit_policy import CompilerAuditPolicy
@@ -21,6 +22,16 @@ from .state import State
 from .tasks import TaskSpec, compile_task
 from .tool_observation_flow import execute_plan_with_read_only_tools
 from .tool_runner import InMemoryReadOnlyToolRunner
+from .uncertainty_router import (
+    UncertaintyRouter,
+    RoutingSignals,
+    RoutingDecision,
+    RoutingResult,
+    RouterConfig,
+)
+from .memory_store import MemoryStore
+from .retrieval_types import RetrievalQuery
+from .retriever import Retriever, RetrievalResult
 
 
 @dataclass(frozen=True)
@@ -210,8 +221,24 @@ def execute_task_in_domain(
     tool_runner: InMemoryReadOnlyToolRunner | None = None,
     promote_tool_observations_to_belief_keys: dict[str, str] | None = None,
     approval_gate: ApprovalGate | None = None,
+    memory_store: MemoryStore | None = None,
+    router: UncertaintyRouter | None = None,
 ) -> RunResult:
-    """Run the deterministic pipeline in an explicit domain context."""
+    """Run the deterministic pipeline in an explicit domain context.
+    
+    Args:
+        raw_input: The raw task input string
+        domain_context: The domain context for policy evaluation
+        event_log: Optional event log for recording events
+        tool_runner: Optional tool runner for executing read-only tools
+        promote_tool_observations_to_belief_keys: Keys for promoting tool observations to beliefs
+        approval_gate: Optional approval gate for high-risk transitions
+        memory_store: Optional memory store for precedent retrieval
+        router: Optional uncertainty router for routing decisions
+        
+    Returns:
+        RunResult containing the full execution trace and results
+    """
 
     log = event_log or EventLog()
     task = compile_task(
@@ -220,13 +247,66 @@ def execute_task_in_domain(
         domain_name=domain_context.domain_name,
     )
     tool_registry = tool_runner.registry if tool_runner is not None else None
+    
+    # Precedent Memory Retrieval (if memory_store provided)
+    precedent_context: List[RetrievalResult] = []
+    if memory_store is not None:
+        retriever = Retriever(memory_store=memory_store)
+        query = RetrievalQuery(
+            query_text=raw_input,
+            domain_label=domain_context.domain_name,
+            limit=5,
+        )
+        precedents = retriever.search_precedents(query)
+        precedent_context = precedents.results
+        if precedent_context:
+            log.append(DeliberationEvent(
+                reasoning_step=ReasoningStep(
+                    observation=f"Retrieved {len(precedent_context)} precedent memories",
+                    reasoning=f"Found similar past tasks that may inform current execution",
+                    alternatives=[f"Precedent: {p.content[:100]}" for p in precedent_context[:3]],
+                    chosen_action="execute_plan",
+                ),
+            ))
+    
     reasoning_step = deliberate_next_action(task, tool_registry=tool_registry)
     log.append(DeliberationEvent(reasoning_step=reasoning_step))
+    
     plan = plan_from_task(
         task,
         tool_registry=tool_registry,
         reasoning_step=reasoning_step,
     )
+    
+    # Uncertainty Routing (if router provided)
+    routing_decision: Optional[RoutingDecision] = None
+    if router is not None:
+        signals = RoutingSignals(
+            evidence_coverage=0.7 if not precedent_context else 0.9,
+            precedent_similarity=0.5,
+            tool_risk_level=task.risk_level.value,
+            historical_success_rate=0.8,
+            model_self_confidence=0.75,
+        )
+        routing_result = router.route(signals)
+        routing_decision = routing_result.decision
+        
+        # Record routing decision to event log
+        log.append(DeliberationEvent(
+            reasoning_step=ReasoningStep(
+                observation=f"Uncertainty routing: {routing_decision.decision.value}",
+                reasoning=routing_decision.reasoning,
+                alternatives=[],
+                chosen_action=routing_decision.decision.value,
+                confidence=routing_decision.confidence,
+            ),
+        ))
+        
+        # Adjust approval strategy based on routing decision
+        if routing_decision.decision.value == "needs_human_review":
+            # Force approval for high-uncertainty tasks
+            approval_gate = approval_gate or ApprovalGate()
+    
     plan_result = _execute_plan_in_domain(
         plan,
         domain_context,
