@@ -131,3 +131,119 @@ class FailingLLMProvider:
                 provider_name=self.provider_name,
             )
         )
+
+
+@dataclass(frozen=True)
+class OpenAIProvider:
+    """OpenAI provider implementing LLMProvider Protocol."""
+
+    api_key: str
+    model_name: str = "gpt-4o-mini"
+    provider_name: str = "openai"
+    base_url: str | None = None
+
+    def complete(self, request: LLMProviderRequest) -> LLMProviderResponse:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenAI SDK is not installed. Install the official `openai` package "
+                "before using the OpenAI provider."
+            ) from exc
+
+        client_kwargs = {"api_key": self.api_key}
+        if self.base_url:
+            client_kwargs["base_url"] = self.base_url
+
+        client = OpenAI(**client_kwargs)
+
+        messages = self._build_messages(request.prompt)
+
+        try:
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                timeout=request.timeout_seconds,
+            )
+        except Exception as exc:
+            error_kind = self._classify_openai_error(exc)
+            raise RuntimeError(
+                LLMProviderError(
+                    request_id=request.request_id,
+                    kind=error_kind,
+                    message=str(exc),
+                    provider_name=self.provider_name,
+                )
+            ) from exc
+
+        response_text = response.choices[0].message.content
+        if not response_text:
+            raise RuntimeError(
+                LLMProviderError(
+                    request_id=request.request_id,
+                    kind="invalid_response",
+                    message="OpenAI returned empty response content",
+                    provider_name=self.provider_name,
+                )
+            )
+
+        return LLMProviderResponse(
+            request_id=request.request_id,
+            response_text=response_text,
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+        )
+
+    def _build_messages(self, prompt: dict[str, object]) -> list[dict[str, str]]:
+        role = prompt.get("role", "user")
+        content = prompt.get("instruction", "")
+        task_info = prompt.get("task", {})
+        context = prompt.get("context", "")
+
+        system_message = {
+            "role": "system",
+            "content": str(content),
+        }
+
+        user_parts = []
+        if task_info:
+            user_parts.append(f"Task: {self._format_task_info(task_info)}")
+        if context:
+            user_parts.append(f"Context: {context}")
+
+        user_message = {
+            "role": "user",
+            "content": "\n\n".join(user_parts) if user_parts else "Proceed with the task.",
+        }
+
+        return [system_message, user_message]
+
+    def _format_task_info(self, task_info: dict[str, object]) -> str:
+        parts = []
+        for key, value in task_info.items():
+            if isinstance(value, (list, tuple)):
+                parts.append(f"{key}: {', '.join(str(v) for v in value)}")
+            else:
+                parts.append(f"{key}: {value}")
+        return "\n".join(parts)
+
+    def _classify_openai_error(self, exc: Exception) -> ProviderErrorKind:
+        error_str = str(exc).lower()
+        if "timeout" in error_str or "timed out" in error_str:
+            return "timeout"
+        if "rate limit" in error_str or "429" in error_str:
+            return "rate_limited"
+        if "invalid" in error_str or "format" in error_str:
+            return "invalid_response"
+        return "provider_error"
+
+
+def get_api_key_from_env() -> str:
+    """Get API key from environment variables."""
+    import os
+    api_key = os.environ.get("CEE_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "No API key found. Set CEE_LLM_API_KEY or OPENAI_API_KEY environment variable."
+        )
+    return api_key

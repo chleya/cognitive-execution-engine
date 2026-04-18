@@ -393,6 +393,7 @@ def execute_task_with_compiler_in_domain(
             raw_input,
             active_compiler,
             domain_name=domain_context.domain_name,
+            fallback_to_deterministic=False,
         )
     except Exception as exc:
         log.append(

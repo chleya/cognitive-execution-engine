@@ -10,3 +10,9 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+cee_storage/
+e2e_report.md
+cee_events.jsonl
+cee_state.json
+*.jsonl
+.trae/

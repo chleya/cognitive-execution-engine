@@ -140,8 +140,16 @@ def build_task_compiler_prompt(raw_input: str) -> dict[str, object]:
 def parse_llm_task_response(response_json: str, *, raw_input: str) -> TaskSpec:
     """Parse and validate an LLM-produced TaskSpec payload."""
 
+    cleaned = response_json.strip()
+    if cleaned.startswith("```"):
+        first_newline = cleaned.index("\n") if "\n" in cleaned else len(cleaned)
+        cleaned = cleaned[first_newline + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
     try:
-        payload = json.loads(response_json)
+        payload = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ValueError("LLM task compiler returned invalid JSON") from exc
 
@@ -203,13 +211,29 @@ def compile_task_with_llm_adapter(
     compiler: LLMTaskCompiler,
     *,
     domain_name: str = "core",
+    fallback_to_deterministic: bool = True,
 ) -> TaskSpec:
     """Compile raw input through a constrained LLM adapter."""
 
     if not raw_input.strip():
         raise ValueError("raw_input cannot be empty")
-    response = compiler.compile(raw_input)
-    task = parse_llm_task_response(response, raw_input=raw_input)
+
+    try:
+        response = compiler.compile(raw_input)
+        task = parse_llm_task_response(response, raw_input=raw_input)
+    except Exception:
+        if not fallback_to_deterministic:
+            raise
+        task = TaskSpec(
+            domain_name=domain_name,
+            objective=raw_input.strip(),
+            kind="analysis",
+            risk_level="medium",
+            success_criteria=(f"Complete: {raw_input.strip()[:50]}",),
+            requested_primitives=("deliberate",),
+            raw_input=raw_input,
+        )
+
     return TaskSpec(
         task_id=task.task_id,
         domain_name=domain_name,
@@ -253,9 +277,21 @@ def _reject_unexpected_llm_task_fields(payload: dict[str, object]) -> None:
         "success_criteria",
         "requested_primitives",
     }
-    present = sorted(set(payload).difference(allowed))
-    if present:
+    schema_fields = {
+        "additionalProperties",
+        "properties",
+        "required",
+        "type",
+        "$schema",
+        "description",
+        "definitions",
+        "constraints",
+        "examples",
+        "default",
+    }
+    present = set(payload).difference(allowed)
+    if present and not present.issubset(schema_fields):
         raise ValueError(
             "LLM task compiler response contains unexpected fields: "
-            + ", ".join(present)
+            + ", ".join(sorted(present))
         )

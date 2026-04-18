@@ -85,6 +85,66 @@ Replaceable domain surfaces:
 | Reflection summarizer | `ReflectionCandidate` | Promote procedural rule |
 | Narrator | User-facing answer | Invent audit facts |
 
+## LLM Provider Integration
+
+| Provider | Class | Status |
+|---|---|---|
+| Static (deterministic) | `StaticLLMProvider` | Default, for tests |
+| OpenAI | `OpenAIProvider` | Production, env-gated |
+| Failing (test) | `FailingLLMProvider` | Error-path tests |
+
+API keys are read from environment variables (`CEE_LLM_API_KEY` or `OPENAI_API_KEY`), never hardcoded.
+
+## Workflow Orchestration
+
+Multi-step workflows are defined as sequences of `WorkflowStep` objects:
+
+```python
+workflow = Workflow(
+    name="Document Analysis Pipeline",
+    steps=[
+        WorkflowStep(step_id="step_1", name="Analyze", action="deliberate", ...),
+        WorkflowStep(step_id="step_2", name="Extract", action="deliberate",
+                     condition="'step_1_summary' in variables", ...),
+    ],
+)
+```
+
+`WorkflowRunner` executes steps sequentially with:
+- Variable passing between steps
+- Conditional execution
+- Error handling (stop or continue)
+- Event log integration
+- Observability metrics
+
+## Configuration Management
+
+YAML/JSON configuration with environment variable overrides:
+
+```yaml
+llm:
+  provider: openai
+  model: gpt-4
+  api_key_env: CEE_LLM_API_KEY
+tools:
+  rate_limit: 60
+  timeout_seconds: 30.0
+policy:
+  auto_approve_read: true
+  require_approval_write: true
+```
+
+Loaded via `CEEConfig.from_yaml()` or `load_config()` auto-discovery.
+
+## Report Generation
+
+`ReportGenerator` produces Markdown reports containing:
+- Execution summary (status, step count, timing)
+- Decision trace (state transition audit)
+- Tool call history (parameters and results)
+- Step results and final output variables
+- Execution metrics
+
 ## Deliberation Boundary
 
 `ReasoningStep` is a bounded runtime contract that sits between `TaskSpec` and

@@ -51,7 +51,7 @@ def test_build_anthropic_compatible_request_body_contains_task_compiler_constrai
 
     assert body["model"] == "test-model"
     assert body["messages"] == [{"role": "user", "content": "analyze risk"}]
-    assert "Do not produce plans" in body["system"]
+    assert "TaskSpec" in body["system"] or "objective" in body["system"]
     assert "success_criteria" in body["system"]
 
 

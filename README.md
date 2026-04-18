@@ -36,16 +36,49 @@ Its architecture is:
 
 ```powershell
 cd F:\cognitive-execution-engine
+pip install -e .
 python -m pytest -q
-python examples\stage0_demo.py
-python examples\reasoning_step_demo.py
-python examples\quality_report_demo.py
+python examples\workflow_demo.py
 ```
 
 Current expected result:
 
 ```text
-218 passed, 2 skipped
+753+ passed, 2 skipped
+```
+
+### CLI Usage
+
+```bash
+# Run a task
+cee run "analyze the codebase" --domain code_review --auto-approve
+
+# With LLM provider
+cee run "analyze the codebase" --llm-provider openai --model gpt-4
+
+# With config file
+cee run "analyze the codebase" --config cee_config.yaml
+
+# Generate execution report
+cee exec-report --log-file events.json --output-file report.md
+
+# Calibrate self-model
+cee calibrate
+```
+
+### API Usage
+
+```bash
+# Start API server
+python -m cee_core.web_api
+
+# Endpoints:
+# POST /tasks          - Execute task
+# GET  /state          - Get current state
+# GET  /events         - Get event log
+# WS   /ws/events      - Real-time event stream
+# GET  /reports/{id}   - Get execution report
+# GET  /docs           - Swagger UI
 ```
 
 ## Current Engine Surfaces
@@ -58,16 +91,27 @@ The engine currently provides:
 - approval semantics for gated state mutations
 - typed task and plan contracts
 - constrained LLM task compiler boundary
-- provider-neutral and env-gated provider boundaries
+- provider-neutral and env-gated provider boundaries (OpenAI, static)
 - tool contracts, read-only runner, planner-proposed read-only tool execution, observation flow, explicit observation promotion
 - explicit domain context runtime entry
 - replayable run artifacts and JSON event artifacts
+- workflow orchestration with multi-step execution, variable passing, conditional steps
+- YAML/JSON configuration management with environment variable overrides
+- Markdown report generation with execution summary, decision trace, tool call history
+- FastAPI REST + WebSocket API with real-time event streaming
+- CLI with `run`, `exec-report`, `calibrate`, `validate`, `export`, `import` commands
+- state persistence with event replay and snapshot support
+- observability with metrics collection and debugging
+- external gateway with HTTP and webhook integration
 
 ## Example Flows
 
+- `python examples\workflow_demo.py`: multi-step workflow orchestration (document analysis, code review, report generation)
 - `python examples\stage0_demo.py`: basic deterministic task -> plan -> policy -> replay demo
-- `python examples\reasoning_step_demo.py`: small-step `TaskSpec -> ReasoningStep -> PlanSpec` demo, including a read-only docs tool path and deterministic narration output
-- `python examples\quality_report_demo.py`: quality baseline report demo for replay, audit, narration, and policy metrics
+- `python examples\reasoning_step_demo.py`: small-step `TaskSpec -> ReasoningStep -> PlanSpec` demo
+- `python examples\quality_report_demo.py`: quality baseline report demo
+- `python examples\demo_document_analysis.py`: document analysis domain demo
+- `python examples\demo_image_generation.py`: image generation domain demo
 
 ## Test Philosophy
 

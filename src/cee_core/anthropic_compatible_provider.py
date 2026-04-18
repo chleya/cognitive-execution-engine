@@ -64,20 +64,60 @@ def build_anthropic_compatible_request_body(
 ) -> dict[str, object]:
     """Build an Anthropic Messages-like request body."""
 
-    raw_input = str(request.prompt.get("raw_input", ""))
+    prompt = request.prompt
+    role = prompt.get("role", "task_compilation")
+
+    if role == "deliberation":
+        instruction = prompt.get("instruction", "Analyze the task and return a JSON reasoning step.")
+        task_info = prompt.get("task", {})
+        context = prompt.get("context", "")
+        user_content = (
+            f"Task: {json.dumps(task_info, ensure_ascii=False)}\n"
+            f"Context: {context}\n\n"
+            f"{instruction}"
+        )
+        system_prompt = (
+            "You are a deliberation engine. Analyze the task and return a JSON object with: "
+            "summary, hypothesis, missing_information, candidate_actions (array), "
+            "chosen_action (one of: propose_plan, request_read_tool, request_approval, propose_redirect, stop), "
+            "rationale, stop_condition. "
+            "Return ONLY the JSON object, no other text."
+        )
+    elif role == "planning":
+        instruction = prompt.get("instruction", "Create a plan for the task.")
+        task_info = prompt.get("task", {})
+        user_content = (
+            f"Task: {json.dumps(task_info, ensure_ascii=False)}\n\n"
+            f"{instruction}"
+        )
+        system_prompt = (
+            "You are a planning engine. Create a plan and return a JSON object with: "
+            "plan_id, steps (array of objects with step_id, action, target, parameters), "
+            "estimated_risk, rationale. "
+            "Return ONLY the JSON object, no other text."
+        )
+    else:
+        raw_input = str(prompt.get("raw_input", ""))
+        user_content = raw_input
+        system_prompt = (
+            "You compile raw user input into a TaskSpec JSON object. "
+            "Return ONLY a filled JSON object with these fields: "
+            "objective (string), kind (one of: analysis, state_update), "
+            "risk_level (one of: low, medium, high), "
+            "success_criteria (array of strings). "
+            "Do NOT return the schema definition. Return a concrete instance. "
+            "Example: {\"objective\": \"Analyze code security\", \"kind\": \"analysis\", "
+            "\"risk_level\": \"medium\", \"success_criteria\": [\"Identify vulnerabilities\"]}"
+        )
+
     return {
         "model": model_name,
         "max_tokens": 800,
-        "system": (
-            "You compile raw user input into JSON for a TaskSpec. "
-            "Return only a JSON object with objective, kind, risk_level, and success_criteria. "
-            "Do not produce plans, state patches, tool calls, or execution instructions. "
-            f"The JSON schema is: {json.dumps(TASK_SPEC_JSON_SCHEMA, ensure_ascii=False)}"
-        ),
+        "system": system_prompt,
         "messages": [
             {
                 "role": "user",
-                "content": raw_input,
+                "content": user_content,
             }
         ],
     }

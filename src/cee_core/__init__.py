@@ -215,6 +215,62 @@ from .ab_testing import (
     ExperimentAnalysis,
     ExperimentStatus,
 )
+from .llm_deliberation import (
+    LLMDeliberationCompiler,
+    ProviderBackedDeliberationCompiler,
+    StaticLLMDeliberationCompiler,
+    deliberate_chain_with_llm,
+    deliberate_with_llm,
+    parse_llm_deliberation_response,
+)
+from .llm_plan_adapter import (
+    LLMPlanCompiler,
+    ProviderBackedPlanCompiler,
+    StaticLLMPlanCompiler,
+    plan_with_llm,
+    parse_llm_plan_response,
+)
+from .embedding_provider import (
+    EnvironmentEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+    build_openai_embedding_provider,
+)
+from .tool_executor import (
+    DefaultToolSandbox,
+    SandboxedToolExecutor,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolHandler,
+    ToolSandbox,
+)
+from .persistence import (
+    StateStore,
+    PersistenceSnapshot,
+    EventStoreEntry,
+)
+from .observability import (
+    ExecutionMetricsCollector,
+    ExecutionObserver,
+    ExecutionPhase,
+    ConsoleMetricsExporter,
+    DebugContext,
+    ExecutionMetric,
+    MetricsExporter,
+    PhaseTiming,
+)
+from .external_gateway import (
+    HTTPGateway,
+    HTTPGatewayConfig,
+    WebhookConfig,
+    WebhookDispatcher,
+    DefaultWebhookSender,
+    RateLimiter,
+)
+from .import_export import (
+    ImportExportManager,
+    ExportPackage,
+    ExportManifest,
+)
 
 __all__ = [
     "ApprovalAuditEvent",
@@ -408,4 +464,44 @@ __all__ = [
     "ExperimentResult",
     "ExperimentAnalysis",
     "ExperimentStatus",
+    "LLMDeliberationCompiler",
+    "ProviderBackedDeliberationCompiler",
+    "StaticLLMDeliberationCompiler",
+    "deliberate_chain_with_llm",
+    "deliberate_with_llm",
+    "parse_llm_deliberation_response",
+    "LLMPlanCompiler",
+    "ProviderBackedPlanCompiler",
+    "StaticLLMPlanCompiler",
+    "plan_with_llm",
+    "parse_llm_plan_response",
+    "EnvironmentEmbeddingProvider",
+    "OpenAIEmbeddingProvider",
+    "build_openai_embedding_provider",
+    "DefaultToolSandbox",
+    "SandboxedToolExecutor",
+    "ToolExecutionContext",
+    "ToolExecutionResult",
+    "ToolHandler",
+    "ToolSandbox",
+    "StateStore",
+    "PersistenceSnapshot",
+    "EventStoreEntry",
+    "ExecutionMetricsCollector",
+    "ExecutionObserver",
+    "ExecutionPhase",
+    "ConsoleMetricsExporter",
+    "DebugContext",
+    "ExecutionMetric",
+    "MetricsExporter",
+    "PhaseTiming",
+    "HTTPGateway",
+    "HTTPGatewayConfig",
+    "WebhookConfig",
+    "WebhookDispatcher",
+    "DefaultWebhookSender",
+    "RateLimiter",
+    "ImportExportManager",
+    "ExportPackage",
+    "ExportManifest",
 ]
