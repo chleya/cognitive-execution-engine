@@ -17,6 +17,7 @@ class DomainContext:
 
     domain_name: str
     plugin_pack: DomainPluginPack | None = None
+    event_format: str = "new"
 
 
 def build_domain_context(

@@ -12,7 +12,7 @@ from uuid import uuid4
 from datetime import datetime, UTC
 from enum import Enum
 
-from .state import StatePatch
+from .world_schema import RevisionDelta
 from .retriever import RetrievalResult
 from .evidence_graph import EvidenceGraph, EvidenceGraphAnalyzer
 from .uncertainty_router import RoutingResult
@@ -29,34 +29,29 @@ class ApprovalVerdict(Enum):
 @dataclass
 class ApprovalPacket:
     """Structured approval request package.
-    
+
     Contains all information needed for a human reviewer to make an
     informed decision about whether to approve an execution request.
     """
-    
-    # Original request
+
     original_task: str
     proposed_actions: str
-    
-    # State impact
+
     state_diff: Dict[str, Any]
-    patches: List[StatePatch]
-    
-    # Evidence and rationale
+    deltas: List[RevisionDelta]
+
     evidence_used: List[RetrievalResult]
     precedent_summary: List[Dict[str, Any]]
     router_result: Optional[RoutingResult]
     evidence_graph: Optional[EvidenceGraph]
-    
-    # Risk assessment
+
     risk_level: str
     reversible: bool
-    
+
     packet_id: str = field(default_factory=lambda: f"approval_{uuid4().hex}")
     created_at: float = field(default_factory=lambda: datetime.now(UTC).timestamp())
     rollback_instructions: str = ""
-    
-    # Review metadata
+
     reviewer_notes: str = ""
     verdict: Optional[ApprovalVerdict] = None
     reviewed_at: Optional[float] = None
@@ -70,7 +65,7 @@ class ApprovalPacket:
             "original_task": self.original_task,
             "proposed_actions": self.proposed_actions,
             "state_diff": self.state_diff,
-            "patches": [p.to_dict() for p in self.patches],
+            "deltas": [d.to_dict() for d in self.deltas],
             "evidence_used": [
                 {
                     "content": e.content,
@@ -95,20 +90,9 @@ class ApprovalPacket:
         }
 
     def format_for_human_review(self, max_length: int = 6000) -> str:
-        """Format the approval packet into a human-readable summary.
-        
-        Designed to be scannable within 30-60 seconds, with key information
-        clearly highlighted.
-        
-        Args:
-            max_length: Maximum length of the returned summary
-            
-        Returns:
-            Formatted string representation of the approval packet
-        """
+        """Format the approval packet into a human-readable summary."""
         parts = []
-        
-        # Header - most important info first
+
         parts.append("=" * 60)
         parts.append("APPROVAL REQUEST")
         parts.append("=" * 60)
@@ -117,14 +101,12 @@ class ApprovalPacket:
         parts.append(f"Risk Level: {self.risk_level.upper()}")
         parts.append(f"Reversible: {'YES' if self.reversible else 'NO'}")
         parts.append("")
-        
-        # Router recommendation (if available)
+
         if self.router_result:
             parts.append(f"Router Recommendation: {self.router_result.decision.value.upper()}")
             parts.append(f"Router Confidence: {self.router_result.confidence:.2f}")
             parts.append("")
-        
-        # Task and actions
+
         parts.append("-" * 60)
         parts.append("TASK & PROPOSED ACTIONS")
         parts.append("-" * 60)
@@ -133,17 +115,15 @@ class ApprovalPacket:
         parts.append("Proposed Actions:")
         parts.append(self.proposed_actions[:300] + "..." if len(self.proposed_actions) > 300 else self.proposed_actions)
         parts.append("")
-        
-        # State impact
+
         parts.append("-" * 60)
         parts.append("STATE IMPACT")
         parts.append("-" * 60)
         state_diff_str = str(self.state_diff)[:400] + "..." if len(str(self.state_diff)) > 400 else str(self.state_diff)
-        parts.append(f"Changes: {len(self.patches)} patch(es)")
+        parts.append(f"Changes: {len(self.deltas)} delta(s)")
         parts.append(f"State Diff: {state_diff_str}")
         parts.append("")
-        
-        # Evidence summary
+
         if self.evidence_used:
             parts.append("-" * 60)
             parts.append(f"EVIDENCE USED ({len(self.evidence_used)})")
@@ -154,8 +134,7 @@ class ApprovalPacket:
             if len(self.evidence_used) > 5:
                 parts.append(f"   ... and {len(self.evidence_used) - 5} more")
             parts.append("")
-        
-        # Precedent summary
+
         if self.precedent_summary:
             parts.append("-" * 60)
             parts.append(f"PRECEDENTS ({len(self.precedent_summary)})")
@@ -166,8 +145,7 @@ class ApprovalPacket:
             if len(self.precedent_summary) > 3:
                 parts.append(f"   ... and {len(self.precedent_summary) - 3} more")
             parts.append("")
-        
-        # Evidence graph quality (if available)
+
         if self.evidence_graph:
             parts.append("-" * 60)
             parts.append("EVIDENCE GRAPH QUALITY")
@@ -180,20 +158,18 @@ class ApprovalPacket:
             parts.append(f"Contradictions Found: {audit['contradictions_found']}")
             parts.append(f"Overall Quality Score: {audit['quality_score']:.2f}")
             parts.append("")
-        
-        # Rollback instructions
+
         if self.rollback_instructions:
             parts.append("-" * 60)
             parts.append("ROLLBACK INSTRUCTIONS")
             parts.append("-" * 60)
             parts.append(self.rollback_instructions[:300] + "..." if len(self.rollback_instructions) > 300 else self.rollback_instructions)
             parts.append("")
-        
-        # Footer - decision area
+
         parts.append("=" * 60)
         parts.append("REVIEWER DECISION")
         parts.append("=" * 60)
-        
+
         if self.verdict:
             parts.append(f"Verdict: {self.verdict.value.upper()}")
             if self.reviewer:
@@ -205,12 +181,11 @@ class ApprovalPacket:
         else:
             parts.append("Please review and select: [APPROVED | REJECTED | NEEDS_MORE_INFO]")
             parts.append("Add notes below:")
-        
-        # Combine and truncate if needed
+
         full_text = "\n".join(parts)
         if len(full_text) > max_length:
             full_text = full_text[:max_length] + "\n[TRUNCATED - too long for preview]"
-        
+
         return full_text
 
     def record_verdict(
@@ -219,13 +194,7 @@ class ApprovalPacket:
         reviewer: str,
         notes: str = ""
     ) -> None:
-        """Record the reviewer's verdict.
-        
-        Args:
-            verdict: The approval verdict
-            reviewer: Identifier of the reviewer
-            notes: Optional notes from the reviewer
-        """
+        """Record the reviewer's verdict."""
         self.verdict = verdict
         self.reviewer = reviewer
         self.reviewer_notes = notes

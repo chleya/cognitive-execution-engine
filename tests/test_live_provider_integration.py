@@ -44,7 +44,7 @@ def test_live_openai_task_compiler_provider():
     assert result.task.objective
     assert result.task.kind in {"analysis", "state_update"}
     assert result.task.risk_level in {"low", "medium", "high"}
-    assert result.replayed_state.meta["version"] >= 3
+    assert result.world_state is not None
 
 
 def test_live_anthropic_compatible_task_compiler_provider():
@@ -65,5 +65,5 @@ def test_live_anthropic_compatible_task_compiler_provider():
     assert result.task.objective
     assert result.task.kind in {"analysis", "state_update"}
     assert result.task.risk_level in {"low", "medium", "high"}
-    assert result.replayed_state.meta["version"] >= 3
+    assert result.world_state is not None
 

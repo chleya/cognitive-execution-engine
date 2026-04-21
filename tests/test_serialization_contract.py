@@ -1,44 +1,17 @@
 from cee_core import (
     DELIBERATION_EVENT_SCHEMA_VERSION,
-    PATCH_SCHEMA_VERSION,
     PLAN_SCHEMA_VERSION,
-    POLICY_DECISION_SCHEMA_VERSION,
     REASONING_STEP_SCHEMA_VERSION,
-    STATE_TRANSITION_EVENT_SCHEMA_VERSION,
     TASK_SCHEMA_VERSION,
     DeliberationEvent,
     PlanSpec,
-    PolicyDecision,
     ReasoningStep,
-    StatePatch,
-    StateTransitionEvent,
+    RevisionDelta,
     TaskSpec,
-    replay_serialized_transition_events,
+    CommitmentEvent,
+    ModelRevisionEvent,
 )
-
-
-def test_state_patch_round_trip():
-    patch = StatePatch(section="beliefs", key="source_count", op="set", value=3)
-
-    payload = patch.to_dict()
-    restored = StatePatch.from_dict(payload)
-
-    assert payload["schema_version"] == PATCH_SCHEMA_VERSION
-    assert restored == patch
-
-
-def test_policy_decision_round_trip():
-    decision = PolicyDecision(
-        verdict="requires_approval",
-        reason="self_model mutation",
-        policy_ref="stage0.patch-policy:v1",
-    )
-
-    payload = decision.to_dict()
-    restored = PolicyDecision.from_dict(payload)
-
-    assert payload["schema_version"] == POLICY_DECISION_SCHEMA_VERSION
-    assert restored == decision
+from cee_core.event_log import EventLog
 
 
 def test_task_spec_round_trip():
@@ -61,10 +34,10 @@ def test_task_spec_round_trip():
 
 
 def test_plan_spec_round_trip():
-    plan = PlanSpec.from_patches(
+    plan = PlanSpec.from_deltas(
         objective="analyze risk",
-        candidate_patches=[
-            StatePatch(section="beliefs", key="risk", op="set", value="low"),
+        candidate_deltas=[
+            RevisionDelta(delta_id="d1", target_kind="entity_update", target_ref="beliefs.risk", before_summary="unknown", after_summary="low", justification="set risk", raw_value="low"),
         ],
         actor="deterministic-planner",
     )
@@ -96,27 +69,6 @@ def test_reasoning_step_round_trip():
     assert restored == step
 
 
-def test_state_transition_event_round_trip():
-    event = StateTransitionEvent(
-        patch=StatePatch(section="beliefs", key="source_count", op="set", value=2),
-        policy_decision=PolicyDecision(
-            verdict="allow",
-            reason="safe",
-            policy_ref="stage0.patch-policy:v1",
-        ),
-        trace_id="tr_1",
-        actor="planner",
-        reason="test",
-        created_at="2026-04-16T00:00:00+00:00",
-    )
-
-    payload = event.to_dict()
-    restored = StateTransitionEvent.from_dict(payload)
-
-    assert payload["schema_version"] == STATE_TRANSITION_EVENT_SCHEMA_VERSION
-    assert restored == event
-
-
 def test_deliberation_event_round_trip():
     event = DeliberationEvent(
         reasoning_step=ReasoningStep(
@@ -142,55 +94,85 @@ def test_deliberation_event_round_trip():
     assert restored == event
 
 
-def test_replay_serialized_transition_events_ignores_non_transition_and_blocked():
-    allowed = StateTransitionEvent(
-        patch=StatePatch(section="beliefs", key="source_count", op="set", value=2),
-        policy_decision=PolicyDecision(
-            verdict="allow",
-            reason="safe",
-            policy_ref="stage0.patch-policy:v1",
-        ),
+def test_commitment_event_round_trip():
+    ce = CommitmentEvent(
+        event_id="ce-test-1",
+        source_state_id="ws_0",
+        commitment_kind="observe",
+        intent_summary="test plan",
+        action_summary="beliefs source_count",
+        success=True,
+        reversibility="reversible",
     )
-    blocked = StateTransitionEvent(
-        patch=StatePatch(section="self_model", key="identity", op="set", value="x"),
-        policy_decision=PolicyDecision(
-            verdict="requires_approval",
-            reason="self model",
-            policy_ref="stage0.patch-policy:v1",
-        ),
+
+    payload = ce.to_dict()
+    restored = CommitmentEvent.from_dict(payload)
+
+    assert restored == ce
+
+
+def test_revision_event_round_trip():
+    delta = RevisionDelta(
+        delta_id="d1",
+        target_kind="entity_update",
+        target_ref="beliefs.source_count",
+        before_summary="unknown",
+        after_summary="2",
+        justification="set source count",
+        raw_value=2,
     )
-    payloads = [
-        {"event_type": "task.received", "payload": {"task_id": "task_1"}},
-        blocked.to_dict(),
-        allowed.to_dict(),
-    ]
+    rev = ModelRevisionEvent(
+        revision_id="rev-1",
+        prior_state_id="ws_0",
+        caused_by_event_id="ce-1",
+        revision_kind="expansion",
+        deltas=(delta,),
+        resulting_state_id="ws_1",
+        revision_summary="set source count",
+    )
 
-    state = replay_serialized_transition_events(payloads)
+    payload = rev.to_dict()
+    restored = ModelRevisionEvent.from_dict(payload)
 
-    assert state.beliefs["source_count"] == 2
-    assert "identity" not in state.self_model
-    assert state.meta["version"] == 1
-
-
-def test_missing_schema_version_is_rejected():
-    payload = StatePatch(section="beliefs", key="x", op="set", value=1).to_dict()
-    payload.pop("schema_version")
-
-    try:
-        StatePatch.from_dict(payload)
-    except ValueError as exc:
-        assert "Missing schema_version" in str(exc)
-    else:
-        raise AssertionError("missing schema_version should be rejected")
+    assert restored == rev
 
 
-def test_unknown_major_schema_version_is_rejected():
-    payload = StatePatch(section="beliefs", key="x", op="set", value=1).to_dict()
-    payload["schema_version"] = "cee.patch.v2"
+def test_replay_world_state_ignores_blocked_transitions():
+    log = EventLog()
 
-    try:
-        StatePatch.from_dict(payload)
-    except ValueError as exc:
-        assert "Unsupported schema major version" in str(exc)
-    else:
-        raise AssertionError("unknown major schema version should be rejected")
+    allowed_ce = CommitmentEvent(
+        event_id="ce-1",
+        source_state_id="",
+        commitment_kind="observe",
+        intent_summary="test",
+        action_summary="beliefs source_count",
+        success=True,
+        reversibility="reversible",
+    )
+    blocked_ce = CommitmentEvent(
+        event_id="ce-2",
+        source_state_id="",
+        commitment_kind="internal_commit",
+        intent_summary="test",
+        action_summary="self_model identity",
+        success=False,
+        reversibility="reversible",
+        requires_approval=True,
+    )
+
+    log.append(allowed_ce)
+    log.append(ModelRevisionEvent(
+        revision_id="rev-1",
+        prior_state_id="ws_0",
+        caused_by_event_id="ce-1",
+        revision_kind="expansion",
+        deltas=(RevisionDelta(delta_id="d1", target_kind="entity_update", target_ref="beliefs.source_count", before_summary="unknown", after_summary="2", justification="test", raw_value=2),),
+        resulting_state_id="ws_1",
+        revision_summary="set source count",
+    ))
+    log.append(blocked_ce)
+
+    ws = log.replay_world_state()
+
+    assert len(log.revision_events()) == 1
+    assert ws.state_id == "ws_1"

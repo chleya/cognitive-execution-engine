@@ -4,10 +4,11 @@ import json
 import pytest
 
 from cee_core.event_log import EventLog
-from cee_core.events import Event, StateTransitionEvent, DeliberationEvent
+from cee_core.events import Event, DeliberationEvent
 from cee_core.events import Event as BaseEvent
-from cee_core.policy import PolicyDecision
-from cee_core.state import StatePatch
+from cee_core.commitment import CommitmentEvent
+from cee_core.revision import ModelRevisionEvent
+from cee_core.world_schema import RevisionDelta
 from cee_core.tools import ToolCallSpec, ToolPolicyDecision, ToolCallEvent, ToolResultEvent
 from cee_core.workflow import Workflow, WorkflowStep, WorkflowResult, StepResult
 from cee_core.report_generator import ReportGenerator, ReportData, ReportSection
@@ -267,38 +268,60 @@ class TestExecutionSummary:
 
 
 class TestDecisionTrace:
-    def test_decision_trace_with_transition_events(self):
+    def test_decision_trace_with_commitment_events(self):
         event_log = EventLog()
 
-        patch = StatePatch(
-            section="memory",
-            key="test_key",
-            op="set",
-            value="test_value",
+        commitment = CommitmentEvent(
+            event_id="evt_1",
+            source_state_id="ws_0",
+            commitment_kind="observe",
+            intent_summary="Read document content",
+            action_summary="request observation from reality interface",
         )
-        policy = PolicyDecision(
-            verdict="allow",
-            reason="Test policy decision",
-            policy_ref="test_policy",
-        )
-        transition = StateTransitionEvent(
-            patch=patch,
-            policy_decision=policy,
-            actor="test_actor",
-            reason="Test transition",
-        )
-        event_log.append(transition)
+        event_log.append(commitment)
 
         gen = ReportGenerator(event_log=event_log)
         data = gen.generate(run_id="trace_test")
 
         trace_sections = [s for s in data.sections if s.heading == "Decision Trace"]
         assert len(trace_sections) == 1
-        assert "test_key" in trace_sections[0].content
-        assert "allow" in trace_sections[0].content
-        assert "test_actor" in trace_sections[0].content
+        assert "evt_1" in trace_sections[0].content
+        assert "observe" in trace_sections[0].content
+        assert "Read document content" in trace_sections[0].content
 
-    def test_decision_trace_with_no_transition_events(self):
+    def test_decision_trace_with_revision_events(self):
+        event_log = EventLog()
+
+        delta = RevisionDelta(
+            delta_id="d1",
+            target_kind="entity_update",
+            target_ref="memory.test_key",
+            before_summary="not set",
+            after_summary="test_value",
+            justification="test",
+            raw_value="test_value",
+        )
+        revision = ModelRevisionEvent(
+            revision_id="rev_1",
+            prior_state_id="ws_0",
+            caused_by_event_id="evt_1",
+            revision_kind="expansion",
+            deltas=(delta,),
+            resulting_state_id="ws_1",
+            revision_summary="Store result",
+        )
+        event_log.append(revision)
+
+        gen = ReportGenerator(event_log=event_log)
+        data = gen.generate(run_id="trace_test")
+
+        trace_sections = [s for s in data.sections if s.heading == "Decision Trace"]
+        assert len(trace_sections) == 1
+        assert "rev_1" in trace_sections[0].content
+        assert "memory.test_key" in trace_sections[0].content
+        assert "expansion" in trace_sections[0].content
+
+    def test_decision_trace_with_no_commitment_or_revision_events(self):
         event_log = EventLog()
         event_log.append(
             Event(
@@ -574,15 +597,34 @@ class TestIntegration:
             )
         )
 
-        patch = StatePatch(section="memory", key="result", op="set", value="done")
-        policy = PolicyDecision(verdict="allow", reason="safe", policy_ref="p1")
-        transition = StateTransitionEvent(
-            patch=patch,
-            policy_decision=policy,
-            actor="workflow_runner",
-            reason="Store result",
+        commitment = CommitmentEvent(
+            event_id="evt_int",
+            source_state_id="ws_0",
+            commitment_kind="tool_contact",
+            intent_summary="Analyze data",
+            action_summary="call analyze tool",
         )
-        event_log.append(transition)
+        event_log.append(commitment)
+
+        delta = RevisionDelta(
+            delta_id="d1",
+            target_kind="entity_update",
+            target_ref="memory.result",
+            before_summary="not set",
+            after_summary="done",
+            justification="Store result",
+            raw_value="done",
+        )
+        revision = ModelRevisionEvent(
+            revision_id="rev_int",
+            prior_state_id="ws_0",
+            caused_by_event_id="evt_int",
+            revision_kind="expansion",
+            deltas=(delta,),
+            resulting_state_id="ws_1",
+            revision_summary="Store result",
+        )
+        event_log.append(revision)
 
         call_spec = ToolCallSpec(tool_name="analyze", arguments={"input": "data"}, call_id="call_int")
         tool_policy = ToolPolicyDecision(verdict="allow", reason="read tool", tool_name="analyze")

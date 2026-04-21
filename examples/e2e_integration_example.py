@@ -229,7 +229,8 @@ def demonstrate_full_integration():
         print(f"  需要审批: {len(result.approval_required_transitions)}")
         
         # 检查事件类型
-        from cee_core.events import DeliberationEvent, StateTransitionEvent
+        from cee_core.events import DeliberationEvent
+        from cee_core.commitment import CommitmentEvent
         events = list(result.event_log.all())
         
         event_types = {}
@@ -243,11 +244,12 @@ def demonstrate_full_integration():
         
         # 创建 artifact 用于重放
         artifact = run_result_to_artifact(result)
-        replayed_state = artifact.replay_state()
-        print(f"\n重放状态:")
-        print(f"  版本: {replayed_state.meta['version']}")
-        print(f"  目标: {len(replayed_state.goals)}")
-        print(f"  信念: {len(replayed_state.beliefs)}")
+        ws = result.world_state
+        if ws is not None:
+            print(f"\nWorldState:")
+            print(f"  ID: {ws.state_id}")
+            print(f"  Goals: {', '.join(ws.dominant_goals) if ws.dominant_goals else '(none)'}")
+            print(f"  Entities: {len(ws.entities)}")
         
     finally:
         shutil.rmtree(temp_dir)

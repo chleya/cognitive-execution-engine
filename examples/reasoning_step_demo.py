@@ -48,7 +48,10 @@ def print_run(title: str, result) -> None:
     print(f"Reasoning candidates   : {result.reasoning_step.candidate_actions}")
     print(f"Plan tool calls        : {len(result.plan.proposed_tool_calls)}")
     print(f"Recorded events        : {len(result.event_log.all())}")
-    print(f"Replay state version   : {result.replayed_state.meta['version']}")
+    ws = result.world_state
+    if ws is not None:
+        print(f"WorldState ID          : {ws.state_id}")
+        print(f"Provenance refs        : {len(ws.provenance_refs)}")
     if result.plan.proposed_tool_calls:
         print(f"First tool call        : {result.plan.proposed_tool_calls[0].tool_name}")
         print(f"Tool call args         : {result.plan.proposed_tool_calls[0].arguments}")

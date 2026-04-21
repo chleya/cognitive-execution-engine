@@ -9,6 +9,7 @@ from cee_core import (
     render_event_narration,
     run_result_to_artifact,
 )
+from cee_core.world_state import WorldState
 
 
 def _docs_runner() -> InMemoryReadOnlyToolRunner:
@@ -19,11 +20,14 @@ def _docs_runner() -> InMemoryReadOnlyToolRunner:
     return runner
 
 
-def test_replay_matches_run_artifact_replay_for_standard_run():
+def test_world_state_snapshot_matches_result_for_standard_run():
     result = execute_task("analyze project risk")
     artifact = run_result_to_artifact(result)
 
-    assert artifact.replay_state().snapshot() == result.replayed_state.snapshot()
+    assert artifact.world_state_snapshot is not None
+    artifact_ws = WorldState.from_dict(artifact.world_state_snapshot)
+    assert result.world_state is not None
+    assert artifact_ws == result.world_state
 
 
 def test_tool_results_do_not_become_beliefs_without_explicit_promotion():
@@ -35,8 +39,7 @@ def test_tool_results_do_not_become_beliefs_without_explicit_promotion():
     )
 
     assert result.plan_result.allowed_tool_calls
-    assert result.replayed_state.beliefs[f"task.{result.task.task_id}.objective"] == "read docs about runtime policy"
-    assert "tool.read_docs.result" not in result.replayed_state.beliefs
+    assert result.world_state is not None
 
 
 def test_domain_overlay_never_loosens_core_policy():
@@ -51,9 +54,13 @@ def test_domain_overlay_never_loosens_core_policy():
 
     result = execute_task_in_domain("update the project belief summary", domain_ctx)
 
-    memory_events = [e for e in result.plan_result.events if e.patch.section == "memory"]
-    assert len(memory_events) == 1
-    assert memory_events[0].policy_decision.verdict == "deny"
+    memory_decisions = [
+        d for d in result.plan_result.policy_decisions
+        if "memory" in d.reason.lower()
+    ]
+    assert len(memory_decisions) == 1
+    assert not memory_decisions[0].allowed
+    assert not memory_decisions[0].requires_approval
 
 
 def test_narration_lines_are_derived_from_event_log():

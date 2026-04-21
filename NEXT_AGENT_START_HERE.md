@@ -9,13 +9,41 @@ Read that first. This file is a human-readable mirror only.
 ## Current State
 
 - Repo: `F:\cognitive-execution-engine`
-- Validation: `python -m pytest -q` -> `382 passed, 2 skipped`
+- Validation: `python -m pytest -q` -> `1147 passed, 2 skipped`
 - Current architecture includes:
-  - `TaskSpec -> ReasoningStep -> PlanSpec`
-  - deterministic narration derived from the audit log
-  - `RunArtifact.narration_lines`
-  - `task_level`-based quality baselines
-  - confidence-bearing belief promotion
+  - `TaskSpec -> ReasoningStep -> PlanSpec` (legacy core, still used internally)
+  - `WorldState + CommitmentEvent + ModelRevisionEvent` (primary architecture)
+  - `bridge_state_to_world / bridge_world_to_state` (compatible, enhanced with raw_value and memory/domain_data round-trip)
+  - `event_format` config: new (default) / dual (compat); legacy mode removed
+  - Runtime produces CommitmentEvent/ModelRevisionEvent as primary event stream
+  - `RunResult.world_state` populated from `EventLog.replay_world_state()`
+  - `RunResult.replayed_state` derived from WorldState via `bridge_world_to_state` (not from StateTransitionEvent replay)
+  - `runtime._execute_plan_in_domain` accepts WorldState directly (no State bridging for current_state)
+  - `domain_policy.evaluate_patch_policy_in_domain` accepts current_beliefs/current_memory dicts (no State dependency)
+  - `extract_beliefs_and_memory_from_world` in bridge.py extracts dicts from WorldState without creating State
+  - `RevisionDelta.raw_value` carries original patch value for lossless replay
+  - Only policy-allowed patches generate ModelRevisionEvent
+  - `/tasks` endpoint: WorldState as primary state, saves directly, bridges back to legacy
+  - `GET /world`: loads directly-saved WorldState first, falls back to bridge
+  - `GET /tasks`: returns actual run_id list from store
+  - `RunArtifact` includes `world_state_snapshot`
+  - `RunArtifact.replay_state()` deprecated; use `world_state_snapshot` with `WorldState.from_dict()` instead
+  - `EventLog.replay_state()` removed; use `replay(log.transition_events())` or `log.replay_world_state()`
+  - Deprecated API endpoints removed (GET/POST /state, GET /report)
+  - app-scoped StateStore (no module-level globals)
+  - safe-by-default API (`auto_approve=False`)
+
+## Migration Phase
+
+The project is in **Phase 2 cutover**: WorldState is the primary state representation.
+
+- Legacy: `State`, `StatePatch`, `StateTransitionEvent`, `PolicyDecision` (still used internally for policy evaluation)
+- Primary: `WorldState`, `CommitmentEvent`, `ModelRevisionEvent`, `CommitmentPolicyDecision`
+- Bridge: `bridge.py` provides compatible bidirectional conversion (enhanced with raw_value and memory/domain_data round-trip)
+- `event_format="new"` is the default; `"dual"` available for compat; `"legacy"` removed
+- `EventLog.replay_state()` is deprecated; use `replay_world_state()` instead
+
+See `docs/migration_plan.md` for the full migration strategy.
 
 ## Already Completed
 
@@ -38,6 +66,26 @@ Read that first. This file is a human-readable mirror only.
 - self-observation and self-model calibration pipeline
 - CLI entry point (cee run / report / validate / calibrate)
 - end-to-end demo with full pipeline
+- WorldState structured representation with entities, relations, hypotheses, anchored facts
+- CommitmentEvent with observe/act/tool_contact/internal_commit kinds
+- ModelRevisionEvent with expansion/correction/refinement kinds
+- CommitmentPolicy: observe default allow, act requires reversibility, irreversible blocked
+- bridge.py: compatible bidirectional State <-> WorldState conversion (enhanced: raw_value, memory/domain_data round-trip)
+- API: /world GET, /world/commitment POST with full closed loop
+- API: /reports/{run_id} with RunArtifact lookup and fallback to event log
+- API: safe-by-default (auto_approve=False, CommitmentRequest Pydantic model)
+- API-level integration tests covering /tasks, /world, /world/commitment, /reports/{run_id}
+- Migration invariant tests: domain_data roundtrip, belief type preservation, dual path consistency
+- Experiment 1: new structure eliminates repeated errors vs baseline
+- Experiment 3: new architecture outperforms stacked solution
+- TASKS-NEW-STATE-001: /tasks operates on WorldState directly
+- PHASE2-CUTOVER-001: event_format default flipped to 'new', legacy mode removed
+- RunResult.world_state field populated from EventLog.replay_world_state()
+- RunArtifact.world_state_snapshot field
+- EventLog.replay_state() deprecated with DeprecationWarning
+- BehavioralSnapshot.commitment_count field, allow_rate considers commitments
+- GET /world loads directly-saved WorldState first
+- GET /tasks returns actual run_id list from store
 
 ## One Current Task
 
@@ -49,7 +97,10 @@ If this file and `handoff_state.json` disagree, `handoff_state.json` wins.
 
 ## Next Task Candidates
 
-None. Awaiting explicit instruction.
+1. Remove bridge.py once all consumers use WorldState directly (BRIDGE-REMOVAL-001)
+2. Migrate RunResult.replayed_state from State to WorldState-native (breaking change, needs versioning) (STATE-INTERNALS-002)
+3. Clean up legacy tests that still use State/StatePatch directly (LEGACY-TEST-CLEANUP-001)
+4. Migrate persistence.py StateStore to WorldState-native storage (PERSISTENCE-MIGRATION-001)
 
 ## Control Philosophy
 
@@ -99,6 +150,8 @@ None. Awaiting explicit instruction.
 - notes:
   - handoff readiness is based on validator, stage checker, and local test execution
   - report cleanliness is local and does not imply remote/runtime control coverage
+  - project is in Phase 2 cutover: event_format='new' is default, legacy mode removed
+  - WorldState is the primary state representation; legacy State is derived via bridge
 
 ## Red-Line Rules
 
@@ -107,6 +160,8 @@ None. Awaiting explicit instruction.
 - do not treat narration as execution authority
 - do not claim focused checks replace full verification
 - do not present handoff readiness as proof of runtime safety outside the checked handoff path
+- do not claim bridge is lossless (it is compatible, with known limitations documented in migration_plan.md)
+- do not re-introduce legacy event_format as default
 
 ## Global Acceptance Gates
 
@@ -122,7 +177,8 @@ None. Awaiting explicit instruction.
 
 ## Module Map
 
-- `state.py`: core state kernel (State, StatePatch, apply_patch, reduce_event, replay)
+### Legacy Core
+- `state.py`: core state kernel (State, StatePatch, apply_patch, reduce_event, replay) [LEGACY - Phase 2 cutover target]
 - `events.py`: event model (Event, StateTransitionEvent, DeliberationEvent)
 - `event_log.py`: event log (EventLog, replay_transition_events, replay_serialized_transition_events)
 - `policy.py`: policy engine (evaluate_patch_policy, build_transition_for_patch)
@@ -130,36 +186,73 @@ None. Awaiting explicit instruction.
 - `approval.py`: human approval (ApprovalDecision, approve_transition, ApprovalGate, ApprovalGateResult, StaticApprovalProvider, CallbackApprovalProvider)
 - `planner.py`: planner (PlanSpec, plan_from_task, execute_plan)
 - `tasks.py`: task spec (TaskSpec, TaskLevel, compile_task, classify_task_level)
+
+### LLM Integration
 - `llm_task_adapter.py`: LLM task compiler adapter (LLMTaskCompiler, compile_task_with_llm_adapter)
 - `llm_provider.py`: LLM provider interface (LLMProvider, LLMProviderRequest, LLMProviderResponse)
-- `openai_provider.py`: OpenAI provider (build_openai_task_compiler_provider, openai_responses_task_compiler_transport)
+- `openai_provider.py`: OpenAI provider
 - `anthropic_compatible_provider.py`: Anthropic-compatible provider
 - `optional_provider.py`: optional provider boundary (EnvironmentLLMProvider)
+
+### Tools & Observation
 - `tools.py`: tool contracts (ToolSpec, ToolCallSpec, ToolRegistry, evaluate_tool_call_policy)
 - `tool_runner.py`: read-only tool runner (InMemoryReadOnlyToolRunner, ReadToolHandler)
-- `tool_observation_flow.py`: tool observation flow (run_read_only_tool_observation_flow, execute_plan_with_read_only_tools)
-- `observations.py`: observation candidates and promotion (ObservationCandidate, promote_observation_to_patch)
+- `tool_observation_flow.py`: tool observation flow
+- `observations.py`: observation candidates and promotion
 - `deliberation.py`: reasoning steps (ReasoningStep, deliberate_next_action)
-- `belief_update.py`: belief confidence updates (promote_observation_to_belief_patch)
+- `belief_update.py`: belief confidence updates
+
+### Quality & Reporting
 - `narration.py`: narration renderer (render_event_narration)
-- `artifacts.py`: artifact serialization (events_to_payloads, replay_event_payload_artifact)
+- `artifacts.py`: artifact serialization
 - `run_artifact.py`: run artifact (RunArtifact, run_result_to_artifact, replay_run_artifact_json)
-- `schemas.py`: schema versioning (require_schema_version, SCHEMA_MAJOR_VERSION)
-- `primitives.py`: cognitive primitives (CognitivePrimitive, validate_primitives)
+- `quality_metrics.py`: quality metrics (QualityMetrics, compute_quality_metrics)
+- `quality_report.py`: quality report (build_quality_report, render_quality_report)
+- `quality_thresholds.py`: quality thresholds and gates
+- `report_generator.py`: Markdown report generation from RunArtifact or event log
+
+### Domain & Configuration
 - `domain_context.py`: domain context runtime entry (DomainContext, build_domain_context)
 - `domain_plugins.py`: domain plugin contracts (DomainPluginRegistry, DomainPluginPack)
 - `domain_policy.py`: domain policy overrides (evaluate_patch_policy_in_domain)
-- `quality_metrics.py`: quality metrics (QualityMetrics, compute_quality_metrics)
-- `quality_report.py`: quality report (build_quality_report, render_quality_report)
-- `quality_thresholds.py`: quality thresholds and gates (assess_quality_gates, assess_quality_gates_for_run)
+- `config.py`: YAML/JSON configuration with env var overrides (CEEConfig, PersistenceConfig, etc.)
+- `schemas.py`: schema versioning (require_schema_version, SCHEMA_MAJOR_VERSION)
+- `primitives.py`: cognitive primitives (CognitivePrimitive, validate_primitives)
+
+### Handoff & Calibration
 - `handoff_validator.py`: handoff validation (validate_handoff_state, validate_handoff_state_file)
 - `handoff_stage_checker.py`: handoff stage gates (assess_handoff_stage_gates)
 - `handoff_report.py`: handoff readiness report (build_handoff_report, render_handoff_report)
+- `confidence_gate.py`: confidence-aware policy escalation
+- `self_observation.py`: behavioral pattern extraction
+- `calibration.py`: self-model calibration pipeline
+
+### Infrastructure
 - `runtime.py`: runtime orchestrator (execute_task, execute_task_in_domain, approval_gate integration)
-- `confidence_gate.py`: confidence-aware policy escalation (evaluate_confidence_gate, ConfidenceGateConfig)
-- `self_observation.py`: behavioral pattern extraction (extract_behavioral_snapshot, BehavioralSnapshot, CalibrationProposal)
-- `calibration.py`: self-model calibration pipeline (run_calibration_cycle, CalibrationResult)
 - `cli.py`: CLI entry point (cee run, cee report, cee validate, cee calibrate)
+- `web_api.py`: FastAPI REST + WebSocket API with /world, /world/commitment, /reports/{run_id}
+- `persistence.py`: file-based persistence for State, WorldState, CommitmentEvent, RevisionEvent, RunArtifact
+- `observability.py`: execution observer with metrics collection and debugging
+- `import_export.py`: import/export manager for execution state packages
+
+### New Architecture (World Model)
+- `world_schema.py`: shared protocol types (WorldEntity, WorldRelation, WorldHypothesis, RevisionDelta) [NEW]
+- `world_state.py`: WorldState with entities, relations, hypotheses, anchored facts [NEW]
+- `commitment.py`: CommitmentEvent with observe/act/tool_contact/internal_commit [NEW]
+- `revision.py`: ModelRevisionEvent with expansion/correction/refinement [NEW]
+- `commitment_policy.py`: commitment policy evaluation (DefaultCommitmentPolicy, evaluate_commitment_policy) [NEW]
+- `revision_policy.py`: revision policy evaluation (DefaultRevisionPolicy, evaluate_revision_policy) [NEW]
+- `simulation.py`: internal simulation engine over WorldState [NEW]
+- `hypothesis_engine.py`: hypothesis generation and ranking from tensions [NEW]
+- `reality_interface.py`: CommitmentEvent <-> tool execution bridge [NEW]
+- `bridge.py`: compatible bidirectional State <-> WorldState conversion [NEW - Phase 1 bridge]
+
+### Specialized Modules
+- `failure_modes.py`: unified failure classification (FailureMode, classify_exception, record_failure)
+- `change_test.py`: change test automation (ChangeProposal, evaluate_change_test)
+- `principles.py`: physics principles (Noether, least action, free energy, replay symmetry, state-policy duality)
+- `common_sense.py`: common sense cognition (conservation law, ground state, second law, equipartition, uncertainty principle)
+- `hypothesis.py`: hypothesis generation and verification cycle
 
 ## Primary Files
 
@@ -238,9 +331,11 @@ Stop and hand off if any of these happen:
 If you are unsure, prefer these in order:
 
 1. `docs/PRINCIPLE_BASELINE_2026-04-16.md`
-2. `README.md`
-3. tests
-4. current code contracts
+2. `ARCHITECTURE.md`
+3. `docs/migration_plan.md`
+4. `README.md`
+5. tests
+6. current code contracts
 
 ## First Command Sequence
 

@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+import json
 import pytest
 
 from cee_core import EventLog, compile_task, execute_plan, plan_from_task
@@ -72,7 +74,7 @@ def test_plan_from_task_does_not_use_raw_input_directly():
     plan = plan_from_task(task)
 
     assert plan.objective == "analyze project risk"
-    assert all(task.raw_input not in str(patch.value) for patch in plan.candidate_patches)
+    assert all(task.raw_input not in str(delta.raw_value) for delta in plan.candidate_deltas)
 
 
 def test_task_to_plan_to_replay_pipeline_applies_allowed_updates():
@@ -80,20 +82,28 @@ def test_task_to_plan_to_replay_pipeline_applies_allowed_updates():
     task = compile_task("analyze project risk", event_log=log)
     plan = plan_from_task(task)
     result = execute_plan(plan, event_log=log)
-    state = log.replay_state()
+    ws = log.replay_world_state()
 
-    assert len(result.allowed) == 4
-    assert state.goals["active"] == [task.task_id]
-    assert state.beliefs[f"task.{task.task_id}.objective"] == "analyze project risk"
-    assert state.beliefs[f"task.{task.task_id}.domain_name"] == "core"
-    assert state.memory["working"][0]["task_id"] == task.task_id
-    assert state.memory["working"][0]["requested_primitives"] == [
+    assert result.allowed_count == 4
+    assert task.task_id in ws.dominant_goals
+    entity = ws.find_entity(f"belief-task.{task.task_id}.objective")
+    assert entity is not None
+    assert "analyze project risk" in entity.summary
+    entity_domain = ws.find_entity(f"belief-task.{task.task_id}.domain_name")
+    assert entity_domain is not None
+    assert "core" in entity_domain.summary
+    mem_entity = ws.find_entity("memory-working")
+    assert mem_entity is not None
+    mem_data = json.loads(mem_entity.summary)
+    assert isinstance(mem_data, list)
+    assert mem_data[0]["task_id"] == task.task_id
+    assert mem_data[0]["requested_primitives"] == [
         "observe",
         "interpret",
         "plan",
         "verify",
     ]
-    assert state.memory["working"][0]["task_level"] == "L1"
+    assert mem_data[0]["task_level"] == "L1"
 
 
 def test_medium_risk_task_generates_approval_required_self_model_patch():
@@ -101,9 +111,10 @@ def test_medium_risk_task_generates_approval_required_self_model_patch():
     task = compile_task("update the project belief summary", event_log=log)
     plan = plan_from_task(task)
     result = execute_plan(plan, event_log=log)
-    state = log.replay_state()
+    ws = log.replay_world_state()
 
-    assert len(result.requires_approval) == 1
-    assert "last_medium_or_high_risk_task" not in state.self_model
-    assert state.goals["active"] == [task.task_id]
-    assert state.beliefs[f"task.{task.task_id}.domain_name"] == "core"
+    assert result.requires_approval_count == 1
+    assert task.task_id in ws.dominant_goals
+    entity_domain = ws.find_entity(f"belief-task.{task.task_id}.domain_name")
+    assert entity_domain is not None
+    assert "core" in entity_domain.summary

@@ -25,10 +25,10 @@ from .handoff_report import build_handoff_report
 from .handoff_validator import validate_handoff_state_file
 from .runtime import execute_task, execute_task_in_domain
 from .domain_context import DomainContext
-from .state import State
+from .world_state import WorldState
+from .persistence import StateStore, save_world_state, load_world_state, load_world_state_from_file
 from .run_artifact import run_result_to_artifact
 from .tasks import TaskSpec
-from .persistence import StateStore, load_state_from_file
 from .observability import ExecutionObserver, ExecutionPhase, DebugContext
 from .import_export import ImportExportManager
 from .llm_deliberation import (
@@ -58,6 +58,8 @@ def _build_llm_provider(args: argparse.Namespace):
 def _format_task_result(result, event_count: int, output_format: str = "text") -> str:
     """Format task execution result."""
 
+    ws = result.world_state
+
     if output_format == "json":
         data = {
             "task": {
@@ -67,11 +69,13 @@ def _format_task_result(result, event_count: int, output_format: str = "text") -
                 "task_level": result.task.task_level,
             },
             "events": event_count,
-            "allowed_transitions": len(result.allowed_transitions),
+            "allowed_transitions": result.allowed_count,
             "denied_transitions": len(result.denied_transitions),
-            "approval_required": len(result.approval_required_transitions),
+            "approval_required": result.requires_approval_count,
             "redirect_proposed": result.redirect_proposed,
-            "final_state": result.replayed_state.snapshot() if result.replayed_state else {},
+            "commitment_events": len(result.commitment_events),
+            "revision_events": len(result.revision_events),
+            "world_state": ws.to_dict() if ws else None,
         }
         return json.dumps(data, indent=2, default=str)
 
@@ -86,10 +90,22 @@ def _format_task_result(result, event_count: int, output_format: str = "text") -
     lines.append(f"  Task Level  : {result.task.task_level}")
     lines.append(f"")
     lines.append(f"  Events      : {event_count}")
-    lines.append(f"  Allowed     : {len(result.allowed_transitions)}")
+    lines.append(f"  Allowed     : {result.allowed_count}")
     lines.append(f"  Denied      : {len(result.denied_transitions)}")
-    lines.append(f"  Approval    : {len(result.approval_required_transitions)}")
+    lines.append(f"  Approval    : {result.requires_approval_count}")
     lines.append(f"  Redirect    : {result.redirect_proposed}")
+    lines.append(f"  Commitments : {len(result.commitment_events)}")
+    lines.append(f"  Revisions   : {len(result.revision_events)}")
+
+    if ws is not None:
+        lines.append(f"")
+        lines.append(f"  World State :")
+        lines.append(f"    ID        : {ws.state_id}")
+        lines.append(f"    Goals     : {', '.join(ws.dominant_goals) if ws.dominant_goals else '(none)'}")
+        lines.append(f"    Entities  : {len(ws.entities)}")
+        lines.append(f"    Hypotheses: {len(ws.hypotheses)}")
+        lines.append(f"    Anchored  : {len(ws.anchored_fact_summaries)}")
+        lines.append(f"    Provenance: {len(ws.provenance_refs)} refs")
 
     lines.append(f"")
     lines.append(f"=" * 60)
@@ -125,7 +141,6 @@ def _cmd_run(args: argparse.Namespace, config: CEEConfig) -> None:
         observer.metrics.end_phase(ExecutionPhase.COMPILATION)
 
     artifact = run_result_to_artifact(result)
-    replayed = artifact.replay_state()
 
     event_count = len(list(log.all()))
     print(_format_task_result(result, event_count, output_format=args.output))
@@ -134,7 +149,7 @@ def _cmd_run(args: argparse.Namespace, config: CEEConfig) -> None:
         observer.export_metrics()
 
     if args.save:
-        _save_run(args.save, artifact, log)
+        _save_run(args.save, artifact, log, result)
 
 
 def _cmd_report(args: argparse.Namespace) -> None:
@@ -148,15 +163,24 @@ def _cmd_report(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     if args.output == "json":
-        from .state import State
         state_data = json.loads(Path(state_path).read_text(encoding="utf-8"))
         report = {
             "state": state_data,
             "report": build_handoff_report(state_path),
         }
+
+        ws_path = Path(state_path).with_suffix(".world_state.json")
+        if ws_path.exists():
+            ws_data = json.loads(ws_path.read_text(encoding="utf-8"))
+            report["world_state"] = ws_data
+
         print(json.dumps(report, indent=2, default=str))
     else:
         print(build_handoff_report(state_path))
+
+        ws_path = Path(state_path).with_suffix(".world_state.json")
+        if ws_path.exists():
+            print(f"\nWorldState file: {ws_path}")
 
     if args.validate:
         result = validate_handoff_state_file(state_path)
@@ -220,10 +244,15 @@ def _cmd_calibrate(args: argparse.Namespace, config: CEEConfig) -> None:
     """Run a self-model calibration cycle."""
 
     state_path = Path(args.state_file)
-    if not state_path.exists():
-        state = State()
-    else:
-        state = _load_state(state_path)
+    self_model: dict[str, object] = {}
+    ws: WorldState | None = None
+    if state_path.exists():
+        ws = load_world_state_from_file(state_path)
+        self_model = {
+            "capabilities": list(ws.self_capability_summary),
+            "limits": list(ws.self_limit_summary),
+            "reliability": ws.self_reliability_estimate,
+        }
 
     log_path = Path(args.log_file) if args.log_file else None
     log = EventLog()
@@ -235,11 +264,12 @@ def _cmd_calibrate(args: argparse.Namespace, config: CEEConfig) -> None:
     if args.auto_approve:
         gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
 
-    result = run_calibration_cycle(log, state, approval_gate=gate)
+    result = run_calibration_cycle(log, current_self_model=self_model, approval_gate=gate)
 
     if args.output == "json":
         data = {
             "total_transitions": result.snapshot.total_transitions,
+            "commitment_count": result.snapshot.commitment_count,
             "allow_rate": result.snapshot.allow_rate,
             "denial_rate": result.snapshot.denial_rate,
             "escalation_rate": result.snapshot.approval_escalation_rate,
@@ -258,6 +288,7 @@ def _cmd_calibrate(args: argparse.Namespace, config: CEEConfig) -> None:
         print(json.dumps(data, indent=2, default=str))
     else:
         print(f"Transitions observed : {result.snapshot.total_transitions}")
+        print(f"Commitments observed : {result.snapshot.commitment_count}")
         print(f"Allow rate           : {result.snapshot.allow_rate:.1%}")
         print(f"Denial rate          : {result.snapshot.denial_rate:.1%}")
         print(f"Escalation rate      : {result.snapshot.approval_escalation_rate:.1%}")
@@ -270,8 +301,8 @@ def _cmd_calibrate(args: argparse.Namespace, config: CEEConfig) -> None:
             print(f"    Key      : {proposal.patch_key}")
             print(f"    Evidence : {', '.join(proposal.evidence[:3])}")
 
-    if args.save_state and result.approved_count > 0:
-        _save_state(args.save_state, state)
+    if args.save_state and result.approved_count > 0 and ws is not None:
+        _save_world_state(args.save_state, ws)
 
 
 def _cmd_validate(args: argparse.Namespace) -> None:
@@ -312,7 +343,7 @@ def _cmd_export(args: argparse.Namespace) -> None:
         print(f"Error: {state_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    state = _load_state(state_path)
+    ws = load_world_state_from_file(state_path)
     log_path = Path(args.log_file) if args.log_file else None
     log = EventLog()
 
@@ -321,12 +352,18 @@ def _cmd_export(args: argparse.Namespace) -> None:
 
     manager = ImportExportManager()
     export_path = manager.export_to_file(
-        state,
+        ws,
         log,
         args.output_file,
         source_name=args.source_name or "cli",
         domain_name=args.domain or "core",
     )
+
+    ws_path = state_path.with_suffix(".world_state.json")
+    if ws_path.exists():
+        ws_data = json.loads(ws_path.read_text(encoding="utf-8"))
+        ws_export_path = Path(args.output_file).with_suffix(".world_state.json")
+        ws_export_path.write_text(json.dumps(ws_data, indent=2, default=str), encoding="utf-8")
 
     if args.output == "json":
         print(json.dumps({
@@ -366,8 +403,8 @@ def _cmd_import(args: argparse.Namespace) -> None:
                 print(f"    - {w}")
 
 
-def _save_run(path: str, artifact, log: EventLog) -> None:
-    """Save run artifact and event log to files."""
+def _save_run(path: str, artifact, log: EventLog, result=None) -> None:
+    """Save run artifact, event log, and WorldState to files."""
 
     artifact_path = Path(path)
     artifact_path.write_text(artifact.dumps(), encoding="utf-8")
@@ -378,22 +415,24 @@ def _save_run(path: str, artifact, log: EventLog) -> None:
     log_path.write_text(json.dumps(events_data, indent=2, default=str), encoding="utf-8")
     print(f"Events saved to {log_path}")
 
+    if result is not None and result.world_state is not None:
+        ws_path = artifact_path.with_suffix(".world_state.json")
+        ws_path.write_text(
+            json.dumps(result.world_state.to_dict(), indent=2, default=str),
+            encoding="utf-8",
+        )
+        print(f"WorldState saved to {ws_path}")
 
-def _save_state(path: str, state: State) -> None:
-    """Save state to a JSON file."""
+
+def _save_world_state(path: str, ws: WorldState) -> None:
+    """Save WorldState to a JSON file."""
 
     state_path = Path(path)
     state_path.write_text(
-        json.dumps(state.snapshot(), indent=2, default=str),
+        json.dumps(ws.to_dict(), indent=2, default=str),
         encoding="utf-8",
     )
-    print(f"State saved to {state_path}")
-
-
-def _load_state(path: Path) -> State:
-    """Load state from a JSON file."""
-
-    return load_state_from_file(path)
+    print(f"WorldState saved to {state_path}")
 
 
 def _load_event_log(path: Path) -> EventLog:
@@ -402,33 +441,40 @@ def _load_event_log(path: Path) -> EventLog:
     log = EventLog()
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list):
-        from .events import StateTransitionEvent
-        from .policy import PolicyDecision
-        from .state import StatePatch
+        from .commitment import CommitmentEvent
+        from .revision import ModelRevisionEvent
+        from .events import DeliberationEvent
+        from .tools import ToolCallEvent, ToolResultEvent
 
         for entry in data:
-            if isinstance(entry, dict) and "patch" in entry:
-                try:
-                    patch = StatePatch(
-                        section=entry["patch"]["section"],
-                        key=entry["patch"]["key"],
-                        op=entry["patch"]["op"],
-                        value=entry["patch"].get("value", {}),
-                    )
-                    decision = PolicyDecision(
-                        verdict=entry["policy_decision"]["verdict"],
-                        reason=entry["policy_decision"]["reason"],
-                        policy_ref=entry["policy_decision"]["policy_ref"],
-                    )
-                    event = StateTransitionEvent(
-                        patch=patch,
-                        policy_decision=decision,
-                        actor=entry.get("actor", "replay"),
-                        reason=entry.get("reason", ""),
+            if not isinstance(entry, dict):
+                continue
+            event_type = entry.get("event_type", "")
+            try:
+                if event_type == "commitment":
+                    event = CommitmentEvent.from_dict(entry)
+                    log.append(event)
+                elif event_type == "revision":
+                    event = ModelRevisionEvent.from_dict(entry)
+                    log.append(event)
+                elif event_type == "deliberation.step":
+                    event = DeliberationEvent.from_dict(entry)
+                    log.append(event)
+                elif event_type == "tool.call":
+                    event = ToolCallEvent.from_dict(entry)
+                    log.append(event)
+                elif event_type == "tool.result":
+                    event = ToolResultEvent.from_dict(entry)
+                    log.append(event)
+                else:
+                    event = Event(
+                        event_type=event_type,
+                        payload=entry.get("payload", {}),
+                        actor=entry.get("actor", "unknown"),
                     )
                     log.append(event)
-                except (KeyError, TypeError):
-                    continue
+            except (KeyError, TypeError):
+                continue
     return log
 
 

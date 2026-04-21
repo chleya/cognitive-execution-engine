@@ -16,3 +16,4 @@ cee_events.jsonl
 cee_state.json
 *.jsonl
 .trae/
+_fix_test.py

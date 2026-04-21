@@ -8,11 +8,10 @@ from cee_core import (
     CalibrationResult,
     DomainContext,
     EventLog,
-    State,
-    StatePatch,
+    RevisionDelta,
     StaticApprovalProvider,
-    calibration_proposal_to_patch,
-    evaluate_patch_policy,
+    calibration_proposal_to_delta,
+    evaluate_delta_policy,
     execute_task_in_domain,
     extract_behavioral_snapshot,
     propose_self_model_calibration,
@@ -25,9 +24,9 @@ from cee_core.self_observation import RedirectProposal
 def _populated_event_log() -> EventLog:
     log = EventLog()
 
-    from cee_core.events import DeliberationEvent, StateTransitionEvent
+    from cee_core.events import DeliberationEvent
+    from cee_core.commitment import CommitmentEvent
     from cee_core.deliberation import ReasoningStep
-    from cee_core.policy import PolicyDecision
     from cee_core.tasks import TaskSpec
 
     task = TaskSpec(
@@ -53,21 +52,22 @@ def _populated_event_log() -> EventLog:
     )
     log.append(DeliberationEvent(reasoning_step=step))
 
-    for section, verdict in [
-        ("goals", "allow"),
-        ("beliefs", "allow"),
-        ("self_model", "requires_approval"),
-        ("policy", "deny"),
-        ("beliefs", "requires_approval"),
+    for section, verdict, req_approval in [
+        ("goals", "allow", False),
+        ("beliefs", "allow", False),
+        ("self_model", "requires_approval", True),
+        ("policy", "deny", False),
+        ("beliefs", "requires_approval", True),
     ]:
-        patch = StatePatch(section=section, key="k1", op="set", value={"v": 1})
-        decision = PolicyDecision(
-            verdict=verdict,
-            reason=f"test {verdict}",
-            policy_ref="test",
-        )
-        log.append(StateTransitionEvent(
-            patch=patch, policy_decision=decision, actor="test", reason="test",
+        log.append(CommitmentEvent(
+            event_id=f"ce-test-{section}",
+            source_state_id="",
+            commitment_kind="act" if verdict == "allow" else "internal_commit",
+            intent_summary=f"test:{section}",
+            action_summary=f"{section} k1",
+            success=verdict == "allow",
+            reversibility="reversible",
+            requires_approval=req_approval,
         ))
 
     return log
@@ -163,14 +163,13 @@ def test_calibration_proposal_to_patch_targets_self_model():
         proposal_id="cal_001",
     )
 
-    patch = calibration_proposal_to_patch(proposal)
+    delta = calibration_proposal_to_delta(proposal)
 
-    assert patch.section == "self_model"
-    assert patch.key == "test_key"
-    assert patch.op == "set"
+    assert delta.target_kind == "self_update"
+    assert delta.target_ref == "self_model.test_key"
 
 
-def test_calibration_proposal_patch_requires_approval():
+def test_calibration_proposal_delta_requires_approval():
     proposal = CalibrationProposal(
         patch_section="self_model",
         patch_key="test_key",
@@ -179,18 +178,17 @@ def test_calibration_proposal_patch_requires_approval():
         proposal_id="cal_001",
     )
 
-    patch = calibration_proposal_to_patch(proposal)
-    decision = evaluate_patch_policy(patch)
+    delta = calibration_proposal_to_delta(proposal)
+    decision = evaluate_delta_policy(delta)
 
-    assert decision.verdict == "requires_approval"
+    assert decision.requires_approval
 
 
 def test_run_calibration_cycle_with_approval():
     log = _populated_event_log()
-    state = State()
     gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
 
-    result = run_calibration_cycle(log, state, approval_gate=gate)
+    result = run_calibration_cycle(log, approval_gate=gate)
 
     assert result.proposal_count > 0
     assert result.approved_count > 0
@@ -198,9 +196,8 @@ def test_run_calibration_cycle_with_approval():
 
 def test_run_calibration_cycle_without_approval_gate():
     log = _populated_event_log()
-    state = State()
 
-    result = run_calibration_cycle(log, state)
+    result = run_calibration_cycle(log)
 
     assert result.proposal_count > 0
     assert result.approval_result is None
@@ -208,21 +205,19 @@ def test_run_calibration_cycle_without_approval_gate():
 
 def test_run_calibration_cycle_on_empty_log():
     log = EventLog()
-    state = State()
 
-    result = run_calibration_cycle(log, state)
+    result = run_calibration_cycle(log)
 
     assert result.proposal_count == 0
-    assert result.transition_events == ()
+    assert result.commitment_events == ()
 
 
 def test_calibration_cycle_audit_trail():
     log = _populated_event_log()
-    state = State()
     initial_event_count = len(list(log.all()))
 
     gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
-    result = run_calibration_cycle(log, state, approval_gate=gate)
+    result = run_calibration_cycle(log, approval_gate=gate)
 
     final_event_count = len(list(log.all()))
     assert final_event_count > initial_event_count
@@ -238,7 +233,7 @@ def test_calibration_from_real_runtime():
 
     snapshot = extract_behavioral_snapshot(log)
 
-    assert snapshot.total_transitions > 0
+    assert snapshot.commitment_count > 0 or snapshot.total_transitions > 0
     assert snapshot.allow_rate > 0.0
 
 

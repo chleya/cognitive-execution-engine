@@ -32,10 +32,7 @@ def treatment_variant_b():
 
 def failing_variant():
     """Variant that sometimes fails."""
-    import random
-    if random.random() < 0.3:
-        raise ValueError("Random failure")
-    return {"accuracy": 0.75, "latency": 110, "success": True}
+    raise ValueError("Deterministic failure for testing")
 
 
 class TestExperimentStatus:

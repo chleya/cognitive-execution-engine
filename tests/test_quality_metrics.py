@@ -31,8 +31,8 @@ def test_quality_metrics_for_standard_run_hit_expected_invariants():
     assert metrics.allowed_transition_count == 4
     assert metrics.blocked_transition_count == 0
     assert metrics.tool_call_count == 0
-    assert metrics.total_event_count == 6
-    assert metrics.schema_valid_event_count == 6
+    assert metrics.total_event_count == 10
+    assert metrics.schema_valid_event_count == 10
 
 
 def test_quality_metrics_for_tool_run_report_observation_counts():
@@ -66,4 +66,4 @@ def test_quality_metrics_for_domain_overlay_keep_integrity_signal():
     metrics = compute_quality_metrics(result)
 
     assert metrics.domain_tightening_integrity_rate == 1.0
-    assert metrics.blocked_transition_count == 2
+    assert metrics.blocked_transition_count == 1

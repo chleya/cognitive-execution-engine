@@ -22,7 +22,7 @@ def test_execute_plan_records_proposed_tool_calls_as_audit_events():
     log = EventLog()
     plan = PlanSpec(
         objective="plan with read tool call",
-        candidate_patches=(),
+        candidate_deltas=(),
         proposed_tool_calls=(
             ToolCallSpec(tool_name="read_docs", arguments={"query": "risk"}),
         ),
@@ -41,7 +41,7 @@ def test_execute_plan_blocks_write_tool_call_but_does_not_execute():
     log = EventLog()
     plan = PlanSpec(
         objective="plan with write tool call",
-        candidate_patches=(),
+        candidate_deltas=(),
         proposed_tool_calls=(
             ToolCallSpec(tool_name="write_doc", arguments={"content": "x"}),
         ),
@@ -54,13 +54,13 @@ def test_execute_plan_blocks_write_tool_call_but_does_not_execute():
     assert len(result.allowed_tool_calls) == 0
     assert len(result.blocked_tool_calls) == 1
     assert result.tool_call_events[0].decision.verdict == "requires_approval"
-    assert log.replay_state().meta["version"] == 0
+    assert log.replay_world_state().state_id == "ws_0"
 
 
 def test_execute_plan_requires_tool_registry_when_plan_proposes_tool_calls():
     plan = PlanSpec(
         objective="plan with read tool call",
-        candidate_patches=(),
+        candidate_deltas=(),
         proposed_tool_calls=(
             ToolCallSpec(tool_name="read_docs", arguments={"query": "risk"}),
         ),
@@ -78,7 +78,7 @@ def test_execute_plan_requires_tool_registry_when_plan_proposes_tool_calls():
 def test_plan_spec_round_trip_preserves_proposed_tool_calls():
     plan = PlanSpec(
         objective="plan with tool call",
-        candidate_patches=(),
+        candidate_deltas=(),
         proposed_tool_calls=(
             ToolCallSpec(tool_name="read_docs", arguments={"query": "risk"}),
         ),

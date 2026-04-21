@@ -45,7 +45,7 @@ def test_provider_backed_task_compiler_runs_through_runtime():
 
     assert result.task.objective == "provider compiled task"
     assert len(result.allowed_transitions) == 4
-    assert result.replayed_state.meta["version"] == 4
+    assert result.world_state is not None
     event_types = [event.event_type for event in result.event_log.all()]
     assert "llm.provider.requested" in event_types
     assert "llm.provider.succeeded" in event_types

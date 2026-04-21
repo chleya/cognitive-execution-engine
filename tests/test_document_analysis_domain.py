@@ -4,9 +4,8 @@ from cee_core import (
     DomainContext,
     DomainPluginRegistry,
     EventLog,
-    State,
-    StatePatch,
-    evaluate_patch_policy_in_domain,
+    RevisionDelta,
+    evaluate_delta_policy_in_domain,
     execute_task_in_domain,
 )
 from cee_core.domains.document_analysis import (
@@ -38,7 +37,7 @@ def test_document_analysis_plugin_pack_has_evaluators():
     assert "conclusion_traceability" in names
 
 
-def test_document_analysis_self_model_requires_approval():
+def test_document_analysis_self_model_delta_requires_approval():
     registry = DomainPluginRegistry()
     registry.register(DOCUMENT_ANALYSIS_PLUGIN_PACK)
     ctx = DomainContext(
@@ -46,10 +45,18 @@ def test_document_analysis_self_model_requires_approval():
         plugin_pack=DOCUMENT_ANALYSIS_PLUGIN_PACK,
     )
 
-    patch = StatePatch(section="self_model", key="k", op="set", value="v")
-    decision = evaluate_patch_policy_in_domain(patch, ctx)
+    delta = RevisionDelta(
+        delta_id="d1",
+        target_kind="self_update",
+        target_ref="self_model.capabilities",
+        before_summary="unknown",
+        after_summary="updated",
+        justification="test self model update",
+        raw_value={"key": "v"},
+    )
+    decision = evaluate_delta_policy_in_domain(delta, ctx)
 
-    assert decision.verdict == "requires_approval"
+    assert decision.requires_approval
 
 
 def test_document_analysis_tool_registry_has_three_tools():
@@ -78,5 +85,5 @@ def test_document_analysis_runs_through_runtime():
     result = execute_task_in_domain("analyze document risk factors", ctx, event_log=log)
 
     assert result.task.objective == "analyze document risk factors"
-    assert result.replayed_state.meta["version"] >= 1
+    assert result.world_state is not None
     assert result.event_log.all()

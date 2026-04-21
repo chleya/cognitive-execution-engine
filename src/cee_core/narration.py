@@ -50,6 +50,16 @@ def _render_event_line(event_type: str, event: EventRecord) -> str | None:
     if event_type == "observation.candidate.recorded":
         return f"Recorded observation from tool: {event.observation.source_tool}"
 
+    if event_type == "commitment":
+        kind = event.commitment_kind
+        summary = event.intent_summary
+        return f"Committed {kind}: {summary}"
+
+    if event_type == "revision":
+        kind = event.revision_kind
+        summary = event.revision_summary or f"{len(event.deltas)} delta(s)"
+        return f"Revised model ({kind}): {summary}"
+
     if event_type == "state.patch.requested":
         verdict = event.policy_decision.verdict
         return f"Evaluated state patch: {event.patch.section}.{event.patch.key} ({verdict})"

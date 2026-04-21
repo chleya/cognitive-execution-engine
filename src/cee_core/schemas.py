@@ -6,13 +6,11 @@ from typing import Mapping
 
 
 SCHEMA_MAJOR_VERSION = 1
-PATCH_SCHEMA_VERSION = "cee.patch.v1"
-POLICY_DECISION_SCHEMA_VERSION = "cee.policy_decision.v1"
 TASK_SCHEMA_VERSION = "cee.task.v1"
 PLAN_SCHEMA_VERSION = "cee.plan.v1"
 REASONING_STEP_SCHEMA_VERSION = "cee.reasoning_step.v1"
-STATE_TRANSITION_EVENT_SCHEMA_VERSION = "cee.state_transition_event.v1"
 DELIBERATION_EVENT_SCHEMA_VERSION = "cee.deliberation_event.v1"
+COMMITMENT_POLICY_SCHEMA_VERSION = "cee.commitment_policy.v1"
 
 
 def require_schema_version(

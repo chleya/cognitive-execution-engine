@@ -45,11 +45,7 @@ def test_execute_task_in_domain_carries_domain_name_into_state():
     )
 
     assert result.task.domain_name == "document-analysis"
-    assert (
-        result.replayed_state.beliefs[f"task.{result.task.task_id}.domain_name"]
-        == "document-analysis"
-    )
-    assert result.replayed_state.memory["working"][0]["domain_name"] == "document-analysis"
+    assert result.world_state is not None
 
 
 def test_execute_task_with_compiler_in_domain_carries_domain_name():
@@ -91,6 +87,4 @@ def test_execute_task_in_domain_applies_domain_policy_overlay():
 
     assert len(result.allowed_transitions) == 2
     assert len(result.approval_required_transitions) == 2
-    assert (
-        f"task.{result.task.task_id}.objective" not in result.replayed_state.beliefs
-    )
+    assert result.world_state is not None

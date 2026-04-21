@@ -1,19 +1,11 @@
 from cee_core import (
     Event,
     EventLog,
-    PolicyDecision,
-    StatePatch,
-    StateTransitionEvent,
-    replay_transition_events,
+    CommitmentEvent,
+    ModelRevisionEvent,
+    RevisionDelta,
 )
-
-
-def _allow() -> PolicyDecision:
-    return PolicyDecision(
-        verdict="allow",
-        reason="safe transition",
-        policy_ref="state-policy:v1",
-    )
+from cee_core.world_state import WorldState
 
 
 def test_event_log_appends_and_lists_events():
@@ -38,56 +30,102 @@ def test_event_log_filters_by_trace_id():
     assert log.by_trace(trace_id) == (first, second)
 
 
-def test_event_log_replays_only_transition_events():
+def test_event_log_replays_only_revision_events():
     log = EventLog()
     log.append(Event(event_type="task.received", payload={"task_id": "t1"}))
-    log.append(
-        StateTransitionEvent(
-            patch=StatePatch(section="beliefs", key="source_count", op="set", value=2),
-            policy_decision=_allow(),
-        )
+
+    ce = CommitmentEvent(
+        event_id="ce-1",
+        source_state_id="",
+        commitment_kind="observe",
+        intent_summary="test",
+        action_summary="beliefs source_count",
+        success=True,
     )
+    rev = ModelRevisionEvent(
+        revision_id="rev-1",
+        prior_state_id="ws_0",
+        caused_by_event_id="ce-1",
+        revision_kind="expansion",
+        deltas=(RevisionDelta(delta_id="d1", target_kind="entity_update", target_ref="beliefs.source_count", before_summary="unknown", after_summary="2", justification="set source count", raw_value=2),),
+        resulting_state_id="ws_1",
+        revision_summary="set source count",
+    )
+    log.append(ce)
+    log.append(rev)
     log.append(Event(event_type="task.completed", payload={"task_id": "t1"}))
 
-    state = log.replay_state()
+    ws = log.replay_world_state()
 
-    assert state.beliefs["source_count"] == 2
-    assert state.meta["version"] == 1
-
-
-def test_replay_transition_events_accepts_mixed_stream():
-    events = [
-        Event(event_type="audit.note", payload={"message": "ignored by replay"}),
-        StateTransitionEvent(
-            patch=StatePatch(section="memory", key="working", op="append", value="step"),
-            policy_decision=_allow(),
-        ),
-    ]
-
-    state = replay_transition_events(events)
-
-    assert state.memory["working"] == ["step"]
-    assert state.meta["version"] == 1
+    entity = ws.find_entity("belief-source_count")
+    assert entity is not None
+    assert ws.state_id == "ws_1"
 
 
-def test_replay_transition_events_ignores_blocked_transition_events():
-    events = [
-        StateTransitionEvent(
-            patch=StatePatch(section="self_model", key="identity", op="set", value="x"),
-            policy_decision=PolicyDecision(
-                verdict="requires_approval",
-                reason="self_model requires approval",
-                policy_ref="stage0.patch-policy:v1",
-            ),
-        ),
-        StateTransitionEvent(
-            patch=StatePatch(section="beliefs", key="source_count", op="set", value=1),
-            policy_decision=_allow(),
-        ),
-    ]
+def test_event_log_replay_world_state_from_commitment_and_revision():
+    log = EventLog()
+    log.append(Event(event_type="task.received", payload={"task_id": "t1"}))
 
-    state = replay_transition_events(events)
+    ce = CommitmentEvent(
+        event_id="ce-1",
+        source_state_id="",
+        commitment_kind="observe",
+        intent_summary="test",
+        action_summary="beliefs source_count",
+        success=True,
+    )
+    rev = ModelRevisionEvent(
+        revision_id="rev-1",
+        prior_state_id="ws_0",
+        caused_by_event_id="ce-1",
+        revision_kind="expansion",
+        deltas=(RevisionDelta(delta_id="d1", target_kind="entity_update", target_ref="beliefs.source_count", before_summary="unknown", after_summary="2", justification="test", raw_value=2),),
+        resulting_state_id="ws_1",
+        revision_summary="set source count",
+    )
+    log.append(ce)
+    log.append(rev)
 
-    assert "identity" not in state.self_model
-    assert state.beliefs["source_count"] == 1
-    assert state.meta["version"] == 1
+    ws = log.replay_world_state()
+
+    assert isinstance(ws, WorldState)
+    assert ws.state_id == "ws_1"
+
+
+def test_event_log_replay_world_state_ignores_blocked_transitions():
+    blocked_ce = CommitmentEvent(
+        event_id="ce-blocked",
+        source_state_id="",
+        commitment_kind="internal_commit",
+        intent_summary="test",
+        action_summary="self_model identity",
+        success=False,
+        requires_approval=True,
+    )
+    allowed_ce = CommitmentEvent(
+        event_id="ce-allowed",
+        source_state_id="",
+        commitment_kind="observe",
+        intent_summary="test",
+        action_summary="beliefs source_count",
+        success=True,
+    )
+    rev = ModelRevisionEvent(
+        revision_id="rev-1",
+        prior_state_id="ws_0",
+        caused_by_event_id="ce-allowed",
+        revision_kind="expansion",
+        deltas=(RevisionDelta(delta_id="d1", target_kind="entity_update", target_ref="beliefs.source_count", before_summary="unknown", after_summary="1", justification="test", raw_value=1),),
+        resulting_state_id="ws_1",
+        revision_summary="set source count",
+    )
+
+    log = EventLog()
+    log.append(blocked_ce)
+    log.append(allowed_ce)
+    log.append(rev)
+
+    ws = log.replay_world_state()
+
+    assert isinstance(ws, WorldState)
+    assert len(log.revision_events()) == 1

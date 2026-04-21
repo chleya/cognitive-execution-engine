@@ -5,18 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from .commitment import CommitmentEvent
 from .domain_context import DomainContext
-from .domain_policy import evaluate_patch_policy_in_domain
 from .event_log import EventLog
-from .events import StateTransitionEvent
 from .observations import (
     ObservationCandidate,
     build_observation_event,
     observation_from_tool_result,
-    promote_observation_to_patch,
+    promote_observation_to_delta,
 )
-from .policy import build_transition_for_patch
-from .state import StatePatch
+from .planner import (
+    DeltaPolicyDecision,
+    PlanExecutionResult,
+    _build_commitment_from_delta,
+    _build_revision_from_delta,
+    evaluate_delta_policy_in_domain,
+)
+from .revision import ModelRevisionEvent
 from .tool_runner import InMemoryReadOnlyToolRunner
 from .tools import (
     ToolCallEvent,
@@ -24,6 +29,7 @@ from .tools import (
     ToolResultEvent,
     build_tool_call_event,
 )
+from .world_schema import RevisionDelta
 
 
 @dataclass(frozen=True)
@@ -33,14 +39,14 @@ class ToolObservationFlowResult:
     tool_call_event: ToolCallEvent
     tool_result_event: ToolResultEvent
     observation: ObservationCandidate | None
-    promotion_patch: StatePatch | None
+    promotion_delta: RevisionDelta | None
 
 
 @dataclass(frozen=True)
 class PlannerToolExecutionResult:
     """Result of executing planner-proposed read-only tool calls."""
 
-    plan_result: object
+    plan_result: PlanExecutionResult
     tool_flow_results: tuple[ToolObservationFlowResult, ...]
 
 
@@ -72,7 +78,7 @@ def run_read_only_tool_observation_flow(
             tool_call_event=tool_call_event,
             tool_result_event=tool_result_event,
             observation=None,
-            promotion_patch=None,
+            promotion_delta=None,
         )
 
     return run_allowed_tool_call_observation_flow(
@@ -103,32 +109,52 @@ def run_allowed_tool_call_observation_flow(
             tool_call_event=tool_call_event,
             tool_result_event=tool_result_event,
             observation=None,
-            promotion_patch=None,
+            promotion_delta=None,
         )
 
     observation = observation_from_tool_result(tool_result_event)
     event_log.append(build_observation_event(observation))
 
-    promotion_patch = None
+    promotion_delta = None
     if promote_to_belief_key is not None:
-        promotion_patch = promote_observation_to_patch(
+        promotion_delta = promote_observation_to_delta(
             observation,
             belief_key=promote_to_belief_key,
         )
-        event_log.append(
-            _build_promotion_transition_event(
-                promotion_patch,
-                observation=observation,
-                domain_context=domain_context,
-            )
-        )
+
+        decision = _evaluate_promotion_decision(promotion_delta, domain_context)
+
+        from .planner import PlanSpec
+        dummy_plan = PlanSpec(objective="promotion", candidate_deltas=(promotion_delta,))
+
+        ce = _build_commitment_from_delta(promotion_delta, decision, dummy_plan, 0)
+        event_log.append(ce)
+
+        if decision.allowed and not decision.requires_approval:
+            prior_state_id = "ws_0"
+            revision_events = [e for e in event_log.all() if isinstance(e, ModelRevisionEvent)]
+            if revision_events:
+                prior_state_id = revision_events[-1].resulting_state_id
+            resulting_state_id = f"ws_{len(revision_events) + 1}"
+            rev = _build_revision_from_delta(promotion_delta, prior_state_id, resulting_state_id, ce, dummy_plan)
+            event_log.append(rev)
 
     return ToolObservationFlowResult(
         tool_call_event=tool_call_event,
         tool_result_event=tool_result_event,
         observation=observation,
-        promotion_patch=promotion_patch,
+        promotion_delta=promotion_delta,
     )
+
+
+def _evaluate_promotion_decision(
+    delta: RevisionDelta,
+    domain_context: DomainContext | None,
+) -> DeltaPolicyDecision:
+    if domain_context is not None:
+        return evaluate_delta_policy_in_domain(delta, domain_context)
+    from .planner import evaluate_delta_policy
+    return evaluate_delta_policy(delta)
 
 
 def execute_plan_with_read_only_tools(
@@ -161,26 +187,4 @@ def execute_plan_with_read_only_tools(
     return PlannerToolExecutionResult(
         plan_result=plan_result,
         tool_flow_results=tuple(flow_results),
-    )
-
-
-def _build_promotion_transition_event(
-    promotion_patch: StatePatch,
-    *,
-    observation: ObservationCandidate,
-    domain_context: DomainContext | None,
-) -> StateTransitionEvent:
-    reason = f"promote observation from {observation.source_tool}"
-    if domain_context is None:
-        return build_transition_for_patch(
-            promotion_patch,
-            actor="observation_promoter",
-            reason=reason,
-        )
-
-    return StateTransitionEvent(
-        patch=promotion_patch,
-        policy_decision=evaluate_patch_policy_in_domain(promotion_patch, domain_context),
-        actor="observation_promoter",
-        reason=reason,
     )

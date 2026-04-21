@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional, Protocol
 from enum import Enum
 
 from .event_log import EventLog
-from .events import Event, StateTransitionEvent, DeliberationEvent
+from .events import Event, DeliberationEvent
+from .commitment import CommitmentEvent
+from .revision import ModelRevisionEvent
 from .tools import ToolCallEvent, ToolResultEvent
 
 
@@ -102,7 +104,7 @@ class ExecutionMetricsCollector:
         )
         self._metrics.append(metric)
 
-    def record_event(self, event: Event | StateTransitionEvent | DeliberationEvent | ToolCallEvent | ToolResultEvent) -> None:
+    def record_event(self, event: Event | DeliberationEvent | CommitmentEvent | ModelRevisionEvent | ToolCallEvent | ToolResultEvent) -> None:
         """Record an event and update counters."""
         self._event_counts[event.event_type] += 1
         
@@ -243,7 +245,7 @@ class ExecutionObserver:
         self._event_log = event_log
         return self
     
-    def observe_event(self, event: Event | StateTransitionEvent | DeliberationEvent | ToolCallEvent | ToolResultEvent) -> None:
+    def observe_event(self, event: Event | DeliberationEvent | CommitmentEvent | ModelRevisionEvent | ToolCallEvent | ToolResultEvent) -> None:
         """Observe an event and record metrics."""
         self.metrics.record_event(event)
         

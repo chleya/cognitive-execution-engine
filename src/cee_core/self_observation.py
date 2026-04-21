@@ -13,8 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .approval import ApprovalAuditEvent
+from .commitment import CommitmentEvent
 from .event_log import EventLog
-from .events import DeliberationEvent, StateTransitionEvent
+from .events import DeliberationEvent
 
 
 @dataclass(frozen=True)
@@ -30,12 +31,14 @@ class BehavioralSnapshot:
     redirect_count: int
     section_outcomes: dict[str, dict[str, int]]
     belief_confidence_values: tuple[float, ...]
+    commitment_count: int = 0
 
     @property
     def allow_rate(self) -> float:
-        if self.total_transitions == 0:
+        total = self.total_transitions
+        if total == 0:
             return 0.0
-        return self.allowed_count / self.total_transitions
+        return self.allowed_count / total
 
     @property
     def denial_rate(self) -> float:
@@ -73,28 +76,22 @@ def extract_behavioral_snapshot(event_log: EventLog) -> BehavioralSnapshot:
     This is a pure read operation. It does not modify any state.
     """
 
-    transitions: list[StateTransitionEvent] = []
     approvals: list[ApprovalAuditEvent] = []
     deliberations: list[DeliberationEvent] = []
+    commitments: list[CommitmentEvent] = []
     belief_confidences: list[float] = []
 
     for event in event_log.all():
-        if isinstance(event, StateTransitionEvent):
-            transitions.append(event)
-            if event.patch.section == "beliefs":
-                confidence = event.patch.value.get("confidence") if isinstance(event.patch.value, dict) else None
-                if isinstance(confidence, (int, float)):
-                    belief_confidences.append(float(confidence))
-        elif isinstance(event, ApprovalAuditEvent):
+        if isinstance(event, ApprovalAuditEvent):
             approvals.append(event)
         elif isinstance(event, DeliberationEvent):
             deliberations.append(event)
+        elif isinstance(event, CommitmentEvent):
+            commitments.append(event)
 
-    allowed_count = sum(1 for t in transitions if t.policy_decision.verdict == "allow")
-    denied_count = sum(1 for t in transitions if t.policy_decision.verdict == "deny")
-    requires_approval_count = sum(
-        1 for t in transitions if t.policy_decision.verdict == "requires_approval"
-    )
+    allowed_count = sum(1 for c in commitments if c.success and not c.requires_approval)
+    denied_count = sum(1 for c in commitments if not c.success and not c.requires_approval)
+    requires_approval_count = sum(1 for c in commitments if c.requires_approval)
 
     approval_approved_count = sum(
         1 for a in approvals if a.decision.verdict == "approved"
@@ -109,21 +106,27 @@ def extract_behavioral_snapshot(event_log: EventLog) -> BehavioralSnapshot:
     )
 
     section_outcomes: dict[str, dict[str, int]] = {}
-    for t in transitions:
-        section = t.patch.section
-        verdict = t.policy_decision.verdict
+    for c in commitments:
+        section = c.action_summary.split()[0] if c.action_summary else "unknown"
+        if c.requires_approval:
+            verdict = "requires_approval"
+        elif c.success:
+            verdict = "allow"
+        else:
+            verdict = "deny"
         if section not in section_outcomes:
             section_outcomes[section] = {"allow": 0, "deny": 0, "requires_approval": 0}
         section_outcomes[section][verdict] = section_outcomes[section].get(verdict, 0) + 1
 
     return BehavioralSnapshot(
-        total_transitions=len(transitions),
+        total_transitions=len(commitments),
         allowed_count=allowed_count,
         denied_count=denied_count,
         requires_approval_count=requires_approval_count,
         approval_approved_count=approval_approved_count,
         approval_rejected_count=approval_rejected_count,
         redirect_count=redirect_count,
+        commitment_count=len(commitments),
         section_outcomes=section_outcomes,
         belief_confidence_values=tuple(belief_confidences),
     )

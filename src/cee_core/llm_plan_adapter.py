@@ -14,10 +14,10 @@ from .event_log import EventLog
 from .events import Event
 from .llm_provider import LLMProvider, LLMProviderRequest
 from .planner import PlanSpec, plan_from_task
-from .state import StatePatch
 from .tasks import TaskSpec
 from .tools import ToolCallSpec, ToolRegistry
 from .deliberation import ReasoningStep
+from .world_schema import RevisionDelta
 
 
 class LLMPlanCompiler(Protocol):
@@ -151,6 +151,24 @@ def build_plan_compiler_prompt(task: TaskSpec, context: str) -> dict[str, object
     }
 
 
+def _section_key_to_target_kind(section: str, key: str) -> str:
+    if section == "goals":
+        return "goal_update"
+    if section == "self_model":
+        return "self_update"
+    if section == "memory":
+        return "entity_update"
+    if section == "beliefs":
+        if key == "hypotheses":
+            return "hypothesis_update"
+        if key == "anchored_facts":
+            return "anchor_add"
+        return "entity_update"
+    if section == "domain_data":
+        return "entity_update"
+    return "entity_update"
+
+
 def parse_llm_plan_response(
     response_json: str,
     task: TaskSpec,
@@ -171,8 +189,8 @@ def parse_llm_plan_response(
     if not isinstance(patches_data, list):
         raise ValueError("LLM plan compiler response must contain a patches array")
 
-    patches = []
-    for patch_data in patches_data:
+    deltas = []
+    for idx, patch_data in enumerate(patches_data):
         if not isinstance(patch_data, dict):
             raise ValueError("Each patch must be a JSON object")
         if "section" not in patch_data or "key" not in patch_data:
@@ -182,12 +200,21 @@ def parse_llm_plan_response(
         if patch_data["op"] not in ("set", "append", "merge", "delete"):
             raise ValueError(f"Invalid patch op: {patch_data['op']}")
 
-        patches.append(
-            StatePatch(
-                section=str(patch_data["section"]),
-                key=str(patch_data["key"]),
-                op=str(patch_data["op"]),
-                value=patch_data.get("value"),
+        section = str(patch_data["section"])
+        key = str(patch_data["key"])
+        value = patch_data.get("value")
+        target_kind = _section_key_to_target_kind(section, key)
+        target_ref = f"{section}.{key}"
+
+        deltas.append(
+            RevisionDelta(
+                delta_id=f"delta-llm-{idx}",
+                target_kind=target_kind,
+                target_ref=target_ref,
+                before_summary="unknown",
+                after_summary=str(value)[:200] if value is not None else "null",
+                justification=patch_data.get("rationale", f"LLM plan: {patch_data['op']} {target_ref}"),
+                raw_value=value,
             )
         )
 
@@ -210,7 +237,7 @@ def parse_llm_plan_response(
 
     return PlanSpec(
         objective=task.objective,
-        candidate_patches=tuple(patches),
+        candidate_deltas=tuple(deltas),
         proposed_tool_calls=tuple(tool_calls),
         actor=actor,
     )

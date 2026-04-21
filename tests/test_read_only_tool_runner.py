@@ -120,8 +120,7 @@ def test_runner_result_event_is_audit_only_for_replay():
     runner.register_handler("read_docs", lambda args: {"hits": 2})
 
     runner.run(ToolCallSpec(tool_name="read_docs", arguments={}), event_log=log)
-    state = log.replay_state()
+    ws = log.replay_world_state()
 
-    assert state.meta["version"] == 0
-    assert state.beliefs == {}
+    assert ws.state_id == "ws_0"
 

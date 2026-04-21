@@ -19,7 +19,7 @@ from cee_core.import_export import (
     ExportPackage,
     ExportManifest,
 )
-from cee_core.state import State
+from cee_core.world_state import WorldState
 from cee_core.event_log import EventLog
 from cee_core.events import Event
 from cee_core.persistence import StateStore
@@ -301,40 +301,30 @@ class TestImportExportManager:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
     def test_export_execution(self):
-        state = State()
-        state.goals["active"] = ["task_1"]
-        state.beliefs["test"] = "value"
-        
+        ws = WorldState(state_id="ws_export", dominant_goals=("task_1",))
+
         log = EventLog()
         log.append(Event(
             event_type="task.received",
             payload={"task_id": "task_1"},
             actor="compiler",
         ))
-        
+
         package = self.manager.export_execution(
-            state,
+            ws,
             log,
             source_name="test_export",
             domain_name="test_domain",
         )
-        
+
         assert package.manifest.source_name == "test_export"
         assert package.manifest.domain_name == "test_domain"
         assert package.manifest.event_count == 1
-        assert package.state["goals"]["active"] == ["task_1"]
     
     def test_import_execution(self):
-        state_data = {
-            "memory": {},
-            "goals": {"active": ["imported_task"]},
-            "beliefs": {"key": "value"},
-            "self_model": {},
-            "policy": {},
-            "domain_data": {},
-            "tool_affordances": {},
-            "meta": {"version": 5},
-        }
+        ws = WorldState(state_id="ws_import", dominant_goals=("imported_task",))
+        state_data = ws.to_dict()
+
         manifest = ExportManifest(
             source_name="import_test",
             state_count=1,
@@ -345,83 +335,68 @@ class TestImportExportManager:
             state=state_data,
             events=[],
         )
-        
+
         result = self.manager.import_execution(package)
-        
+
         assert result["status"] == "succeeded"
         assert result["state_restored"] is True
         assert result["events_imported"] == 0
-        
-        restored_state = self.store.load_state()
-        assert restored_state.goals["active"] == ["imported_task"]
-        assert restored_state.beliefs["key"] == "value"
+
+        restored_ws = self.store.load_world_state()
+        assert "imported_task" in restored_ws.dominant_goals
     
     def test_export_and_import_roundtrip(self):
-        original_state = State()
-        original_state.goals["active"] = ["roundtrip_task"]
-        original_state.beliefs["data"] = "preserved"
-        original_state.meta["version"] = 10
-        
+        ws = WorldState(state_id="ws_roundtrip", dominant_goals=("roundtrip_task",))
+
         original_log = EventLog()
         original_log.append(Event(
             event_type="task.received",
             payload={"task_id": "roundtrip_task"},
             actor="compiler",
         ))
-        
+
         export_path = self.manager.export_to_file(
-            original_state,
+            ws,
             original_log,
             os.path.join(self.temp_dir, "roundtrip.json"),
             source_name="roundtrip",
             domain_name="test",
         )
-        
+
         import_result = self.manager.import_from_file(export_path)
-        
+
         assert import_result["status"] == "succeeded"
         assert import_result["state_restored"] is True
-        
-        imported_state = self.store.load_state()
-        assert imported_state.goals["active"] == ["roundtrip_task"]
-        assert imported_state.beliefs["data"] == "preserved"
-        assert imported_state.meta["version"] == 10
-    
+
+        imported_ws = self.store.load_world_state()
+        assert "roundtrip_task" in imported_ws.dominant_goals
+
     def test_get_export_info(self):
-        state = State()
-        state.goals["active"] = ["info_task"]
-        
+        ws = WorldState(state_id="ws_info", dominant_goals=("info_task",))
+
         log = EventLog()
         log.append(Event(
             event_type="task.received",
             payload={"task_id": "info_task"},
             actor="compiler",
         ))
-        
+
         export_path = self.manager.export_to_file(
-            state,
+            ws,
             log,
             os.path.join(self.temp_dir, "info.json"),
         )
-        
+
         info = self.manager.get_export_info(export_path)
-        
+
         assert info["manifest"]["source_name"] == "cee_instance"
         assert info["manifest"]["event_count"] == 1
         assert "task.received" in info["event_types"]
         assert "state_keys" in info
     
     def test_export_version_warning(self):
-        state_data = {
-            "memory": {},
-            "goals": {},
-            "beliefs": {},
-            "self_model": {},
-            "policy": {},
-            "domain_data": {},
-            "tool_affordances": {},
-            "meta": {},
-        }
+        ws = WorldState(state_id="ws_0")
+        state_data = ws.to_dict()
         manifest = ExportManifest(
             version="0.9.0",
             source_name="old_version",
@@ -431,8 +406,8 @@ class TestImportExportManager:
             state=state_data,
             events=[],
         )
-        
+
         result = self.manager.import_execution(package)
-        
+
         assert len(result["warnings"]) > 0
         assert "Version mismatch" in result["warnings"][0]

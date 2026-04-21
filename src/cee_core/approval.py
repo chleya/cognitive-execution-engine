@@ -7,8 +7,7 @@ from datetime import datetime, timezone
 from typing import Callable, Literal, Protocol
 from uuid import uuid4
 
-from .events import StateTransitionEvent
-from .policy import PolicyDecision
+from .commitment import CommitmentEvent
 
 
 ApprovalVerdict = Literal["approved", "rejected"]
@@ -65,71 +64,41 @@ class ApprovalAuditEvent:
         }
 
 
-def approve_transition(
-    event: StateTransitionEvent,
-    decision: ApprovalDecision,
-) -> StateTransitionEvent:
-    """Convert a requires-approval transition into an allowed transition."""
-
-    if event.trace_id != decision.transition_trace_id:
-        raise ValueError("Approval decision does not match transition trace_id")
-
-    if event.policy_decision.verdict != "requires_approval":
-        raise ValueError("Only requires_approval transitions can be approved")
-
-    if not decision.approved:
-        raise PermissionError("Approval decision rejected this transition")
-
-    return StateTransitionEvent(
-        patch=event.patch,
-        policy_decision=PolicyDecision(
-            verdict="allow",
-            reason=f"approved by {decision.decided_by}: {decision.reason}",
-            policy_ref=event.policy_decision.policy_ref,
-        ),
-        trace_id=event.trace_id,
-        actor=event.actor,
-        reason=event.reason,
-        created_at=event.created_at,
-    )
-
-
 class ApprovalProvider(Protocol):
     """Protocol for providing approval decisions at runtime."""
 
-    def decide(self, event: StateTransitionEvent) -> ApprovalDecision: ...
+    def decide(self, event: CommitmentEvent) -> ApprovalDecision: ...
 
 
 @dataclass
 class ApprovalGate:
     """Gate that resolves requires_approval transitions using a provider.
 
-    The gate processes a sequence of transition events, resolving any that
-    require approval through the injected provider. Approved transitions
-    are converted to allowed; rejected or unresolved transitions remain
-    blocked and are excluded from the final state.
+    The gate processes a sequence of commitment events, resolving any that
+    require approval through the injected provider. Approved commitments
+    are recorded; rejected or unresolved commitments remain blocked.
     """
 
     provider: ApprovalProvider
 
     def resolve(
         self,
-        events: tuple[StateTransitionEvent, ...],
+        events: tuple[CommitmentEvent, ...],
     ) -> ApprovalGateResult:
         """Resolve all requires_approval events through the provider."""
-        approved_events: list[StateTransitionEvent] = []
+        approved_events: list[CommitmentEvent] = []
         approval_decisions: list[ApprovalDecision] = []
-        rejected_events: list[StateTransitionEvent] = []
+        rejected_events: list[CommitmentEvent] = []
 
         for event in events:
-            if event.policy_decision.verdict != "requires_approval":
+            if not event.requires_approval:
                 continue
 
             decision = self.provider.decide(event)
             approval_decisions.append(decision)
 
             if decision.approved:
-                approved_events.append(approve_transition(event, decision))
+                approved_events.append(event)
             else:
                 rejected_events.append(event)
 
@@ -144,9 +113,9 @@ class ApprovalGate:
 class ApprovalGateResult:
     """Result of running approval resolution on a set of transitions."""
 
-    approved_transitions: tuple[StateTransitionEvent, ...]
+    approved_transitions: tuple[CommitmentEvent, ...]
     decisions: tuple[ApprovalDecision, ...]
-    rejected_transitions: tuple[StateTransitionEvent, ...]
+    rejected_transitions: tuple[CommitmentEvent, ...]
 
     @property
     def approval_count(self) -> int:
@@ -170,9 +139,9 @@ class StaticApprovalProvider:
     decided_by: str = "static_provider"
     reason: str = "auto-approved"
 
-    def decide(self, event: StateTransitionEvent) -> ApprovalDecision:
+    def decide(self, event: CommitmentEvent) -> ApprovalDecision:
         return ApprovalDecision(
-            transition_trace_id=event.trace_id,
+            transition_trace_id=event.event_id,
             verdict=self.verdict,
             decided_by=self.decided_by,
             reason=self.reason,
@@ -183,7 +152,7 @@ class StaticApprovalProvider:
 class CallbackApprovalProvider:
     """Provider that delegates to a callable for each approval request."""
 
-    callback: Callable[[StateTransitionEvent], ApprovalDecision]
+    callback: Callable[[CommitmentEvent], ApprovalDecision]
 
-    def decide(self, event: StateTransitionEvent) -> ApprovalDecision:
+    def decide(self, event: CommitmentEvent) -> ApprovalDecision:
         return self.callback(event)

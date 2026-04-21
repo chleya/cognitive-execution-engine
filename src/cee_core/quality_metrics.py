@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .narration import render_event_narration
 from .run_artifact import run_result_to_artifact
 from .runtime import RunResult
+from .world_state import WorldState
 
 
 @dataclass(frozen=True)
@@ -46,8 +47,13 @@ def compute_quality_metrics(result: RunResult) -> QualityMetrics:
     )
     total_events = len(event_payloads)
 
-    replay_matches = run_result_to_artifact(result).replay_state().snapshot() == result.replayed_state.snapshot()
-    narration_matches = render_event_narration(result.event_log.all()) == run_result_to_artifact(result).narration_lines
+    artifact = run_result_to_artifact(result)
+    if result.world_state is not None and artifact.world_state_snapshot is not None:
+        artifact_ws = WorldState.from_dict(artifact.world_state_snapshot)
+        replay_matches = artifact_ws == result.world_state
+    else:
+        replay_matches = True
+    narration_matches = render_event_narration(result.event_log.all()) == artifact.narration_lines
 
     tool_call_events = result.plan_result.tool_call_events
     tool_results = [
@@ -82,14 +88,14 @@ def compute_quality_metrics(result: RunResult) -> QualityMetrics:
     )
 
     domain_integrity = 1.0
-    domain_events = [
-        event
-        for event in result.plan_result.events
-        if event.policy_decision.policy_ref.startswith("domain-overlay:")
+    domain_decisions = [
+        d
+        for d in result.plan_result.policy_decisions
+        if "domain policy" in d.reason
     ]
-    if domain_events and not all(
-        event.policy_decision.verdict in {"deny", "requires_approval"}
-        for event in domain_events
+    if domain_decisions and not all(
+        d.requires_approval or not d.allowed
+        for d in domain_decisions
     ):
         domain_integrity = 0.0
 
@@ -118,15 +124,15 @@ def compute_quality_metrics(result: RunResult) -> QualityMetrics:
             max(len(tool_results), len(promotion_events)),
         ),
         schema_valid_event_rate=_rate(schema_valid_events, total_events),
-        audit_coverage_rate=1.0 if total_events >= len(result.plan_result.events) else 0.0,
+        audit_coverage_rate=1.0 if total_events >= len(result.commitment_events) else 0.0,
         narration_consistency_rate=1.0 if narration_matches else 0.0,
         domain_tightening_integrity_rate=domain_integrity,
         high_risk_approval_coverage=high_risk_approval_coverage,
         total_event_count=total_events,
         schema_valid_event_count=schema_valid_events,
-        allowed_transition_count=len(result.allowed_transitions),
-        blocked_transition_count=len(result.blocked_transitions),
-        approval_required_transition_count=len(result.approval_required_transitions),
+        allowed_transition_count=result.allowed_count,
+        blocked_transition_count=result.blocked_count,
+        approval_required_transition_count=result.requires_approval_count,
         denied_transition_count=len(result.denied_transitions),
         tool_call_count=len(tool_call_events),
         tool_result_count=len(tool_results),
@@ -134,7 +140,7 @@ def compute_quality_metrics(result: RunResult) -> QualityMetrics:
         unauthorized_tool_execution_count=unauthorized_tool_results,
         automatic_belief_promotion_count=automatic_belief_promotions,
         promotion_event_count=len(promotion_events),
-        domain_overlay_event_count=len(domain_events),
+        domain_overlay_event_count=len(domain_decisions),
     )
 
 

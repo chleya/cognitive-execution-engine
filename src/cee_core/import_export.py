@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
-from .state import State
+from .world_state import WorldState
 from .event_log import EventLog
 from .events import Event
 from .persistence import StateStore
@@ -117,7 +117,7 @@ class ImportExportManager:
     
     def export_execution(
         self,
-        state: State,
+        state: WorldState,
         event_log: EventLog,
         *,
         source_name: str = "cee_instance",
@@ -137,7 +137,7 @@ class ImportExportManager:
         
         return ExportPackage(
             manifest=manifest,
-            state=state.snapshot(),
+            state=state.to_dict(),
             events=events,
             metadata=metadata or {},
         )
@@ -157,17 +157,8 @@ class ImportExportManager:
             )
         
         if self.state_store is not None:
-            state = State(
-                memory=package.state.get("memory", {}),
-                goals=package.state.get("goals", {}),
-                beliefs=package.state.get("beliefs", {}),
-                self_model=package.state.get("self_model", {}),
-                policy=package.state.get("policy", {}),
-                domain_data=package.state.get("domain_data", {}),
-                tool_affordances=package.state.get("tool_affordances", {}),
-                meta=package.state.get("meta", {}),
-            )
-            self.state_store.save_state(state)
+            ws = WorldState.from_dict(package.state)
+            self.state_store.save_world_state(ws)
             result["state_restored"] = True
         
         result["events_imported"] = len(package.events)
@@ -176,7 +167,7 @@ class ImportExportManager:
     
     def export_to_file(
         self,
-        state: State,
+        state: WorldState,
         event_log: EventLog,
         file_path: str | Path,
         **kwargs,

@@ -1,11 +1,12 @@
-"""End-to-end real scenario verification for CEE.
+"""End-to-end real scenario verification for CEE (new architecture).
 
 Runs a complete workflow with a real LLM provider to validate:
 1. LLM deliberation produces meaningful reasoning steps
-2. Workflow orchestration executes multi-step tasks
-3. Policy enforcement gates state transitions
-4. Observability captures execution metrics
-5. Report generation produces readable output
+2. Runtime produces CommitmentEvent + ModelRevisionEvent
+3. WorldState is the primary state output
+4. Policy enforcement gates state transitions
+5. Observability captures execution metrics
+6. Report generation produces readable output from RunArtifact
 
 Usage:
     set CEE_LLM_API_KEY=your-api-key
@@ -20,6 +21,7 @@ import json
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -41,8 +43,8 @@ from cee_core.llm_task_adapter import (
 )
 from cee_core.llm_provider import LLMProviderRequest
 from cee_core.event_log import EventLog
-from cee_core.state import State, StatePatch, apply_patch
-from cee_core.policy import evaluate_patch_policy
+from cee_core.world_schema import RevisionDelta
+from cee_core.planner import evaluate_delta_policy
 from cee_core.observability import ExecutionObserver, ExecutionPhase, DebugContext
 from cee_core.report_generator import ReportGenerator
 from cee_core.workflow import (
@@ -52,6 +54,13 @@ from cee_core.workflow import (
     LLMDeliberationStepExecutor,
 )
 from cee_core.tasks import TaskSpec
+from cee_core.runtime import execute_task_in_domain, RunResult
+from cee_core.domain_context import DomainContext, build_domain_context
+from cee_core.world_state import WorldState
+from cee_core.commitment import CommitmentEvent
+from cee_core.revision import ModelRevisionEvent
+from cee_core.run_artifact import run_result_to_artifact, RunArtifact
+from cee_core.persistence import StateStore, save_world_state, load_world_state
 
 
 def check_environment():
@@ -102,7 +111,7 @@ def test_llm_task_compilation(provider):
         events = list(log.all())
         print(f"  Events logged: {len(events)}")
         for e in events:
-            print(f"    [{e.event_type}] actor={e.actor}")
+            print(f"    [{e.event_type}]")
         print()
 
         return task
@@ -158,31 +167,83 @@ def test_policy_enforcement():
     print("  Test 3: Policy Enforcement")
     print("=" * 70)
 
-    state = State()
+    allowed_delta = RevisionDelta(
+        delta_id="d1", target_kind="entity_update", target_ref="memory.test_key",
+        before_summary="not set", after_summary="test_value",
+        justification="test", raw_value="test_value",
+    )
+    decision = evaluate_delta_policy(allowed_delta)
+    print(f"  Memory delta: allowed={decision.allowed}, reason={decision.reason}")
 
-    allowed_patch = StatePatch(section="memory", key="test_key", op="set", value="test_value")
-    decision = evaluate_patch_policy(allowed_patch)
-    print(f"  Memory patch: verdict={decision.verdict}, reason={decision.reason}")
+    denied_delta = RevisionDelta(
+        delta_id="d2", target_kind="policy_update", target_ref="policy.test_key",
+        before_summary="not set", after_summary="test_value",
+        justification="test", raw_value="test_value",
+    )
+    decision = evaluate_delta_policy(denied_delta)
+    print(f"  Policy delta: allowed={decision.allowed}, reason={decision.reason}")
 
-    denied_patch = StatePatch(section="policy", key="test_key", op="set", value="test_value")
-    decision = evaluate_patch_policy(denied_patch)
-    print(f"  Policy patch: verdict={decision.verdict}, reason={decision.reason}")
+    approval_delta = RevisionDelta(
+        delta_id="d3", target_kind="self_update", target_ref="self_model.capabilities",
+        before_summary="unknown", after_summary="bounded",
+        justification="test", raw_value={"planner": "bounded"},
+    )
+    decision = evaluate_delta_policy(approval_delta)
+    print(f"  Self-model delta: allowed={decision.allowed}, requires_approval={decision.requires_approval}, reason={decision.reason}")
 
-    approval_patch = StatePatch(section="self_model", key="test_key", op="set", value="test_value")
-    decision = evaluate_patch_policy(approval_patch)
-    print(f"  Self-model patch: verdict={decision.verdict}, reason={decision.reason}")
-
-    new_state = apply_patch(state, allowed_patch)
-    print(f"  State after allowed patch: version={new_state.meta.get('version', 0)}")
-    print(f"  Memory content: {new_state.memory}")
+    print(f"  Policy enforcement verified: memory=allow, policy=deny, self_model=requires_approval")
     print()
 
     return True
 
 
+def test_runtime_with_world_state():
+    print("=" * 70)
+    print("  Test 4: Runtime with WorldState (new architecture)")
+    print("=" * 70)
+
+    ctx = build_domain_context("core")
+    result = execute_task_in_domain("analyze project risks and update beliefs", ctx)
+
+    ws = result.world_state
+    print(f"  Task: {result.task.objective}")
+    print(f"  Kind: {result.task.kind}")
+    print(f"  Risk Level: {result.task.risk_level}")
+    print(f"  Allowed transitions: {len(result.allowed_transitions)}")
+    print(f"  Denied transitions: {len(result.denied_transitions)}")
+    print(f"  Commitment events: {len(result.commitment_events)}")
+    print(f"  Revision events: {len(result.revision_events)}")
+
+    if ws is not None:
+        print(f"  WorldState:")
+        print(f"    ID: {ws.state_id}")
+        print(f"    Goals: {', '.join(ws.dominant_goals) if ws.dominant_goals else '(none)'}")
+        print(f"    Entities: {len(ws.entities)}")
+        print(f"    Hypotheses: {len(ws.hypotheses)}")
+        print(f"    Anchored facts: {len(ws.anchored_fact_summaries)}")
+        print(f"    Provenance refs: {len(ws.provenance_refs)}")
+    else:
+        print(f"  WorldState: None (unexpected)")
+
+    log = result.event_log
+    ce_events = log.commitment_events()
+    rev_events = log.revision_events()
+    print(f"  EventLog contents:")
+    print(f"    CommitmentEvents: {len(ce_events)}")
+    print(f"    ModelRevisionEvents: {len(rev_events)}")
+
+    artifact = run_result_to_artifact(result)
+    print(f"  RunArtifact:")
+    print(f"    World state snapshot: {'present' if artifact.world_state_snapshot else 'absent'}")
+    print(f"    Narration lines: {len(artifact.narration_lines)}")
+    print()
+
+    return result
+
+
 def test_workflow_with_llm(provider):
     print("=" * 70)
-    print("  Test 4: Workflow with LLM Deliberation")
+    print("  Test 5: Workflow with LLM Deliberation")
     print("=" * 70)
 
     compiler = ProviderBackedDeliberationCompiler(provider=provider)
@@ -251,12 +312,22 @@ def test_workflow_with_llm(provider):
         return None
 
 
-def test_report_generation(workflow_result):
+def test_report_generation(runtime_result, workflow_result):
     print("=" * 70)
-    print("  Test 5: Report Generation")
+    print("  Test 6: Report Generation (from RunArtifact)")
     print("=" * 70)
 
-    gen = ReportGenerator(workflow_result=workflow_result)
+    if runtime_result is not None:
+        artifact = run_result_to_artifact(runtime_result)
+        gen = ReportGenerator(
+            event_log=runtime_result.event_log,
+            run_artifact=artifact,
+        )
+    elif workflow_result is not None:
+        gen = ReportGenerator(workflow_result=workflow_result)
+    else:
+        gen = ReportGenerator()
+
     md = gen.render_markdown(run_id="real_scenario_test")
 
     print(f"  Report generated: {len(md)} characters")
@@ -275,14 +346,23 @@ def test_report_generation(workflow_result):
     report_path = Path("e2e_report.md")
     report_path.write_text(md, encoding="utf-8")
     print(f"  Report saved to: {report_path}")
-    print()
 
+    if runtime_result is not None and runtime_result.world_state is not None:
+        ws_path = Path("e2e_world_state.json")
+        ws_path.write_text(
+            json.dumps(runtime_result.world_state.to_dict(), indent=2, default=str),
+            encoding="utf-8",
+        )
+        print(f"  WorldState saved to: {ws_path}")
+
+    print()
     return len(md) > 100
 
 
 def main():
     print()
     print("Cognitive Execution Engine - End-to-End Real Scenario Verification")
+    print("  (New Architecture: WorldState + CommitmentEvent + ModelRevisionEvent)")
     print("=" * 70)
     print()
 
@@ -298,8 +378,9 @@ def main():
     task = test_llm_task_compilation(provider)
     step = test_llm_deliberation(provider, task)
     test_policy_enforcement()
+    runtime_result = test_runtime_with_world_state()
     workflow_result = test_workflow_with_llm(provider)
-    test_report_generation(workflow_result)
+    test_report_generation(runtime_result, workflow_result)
 
     total_time = time.time() - start_time
 
@@ -310,11 +391,19 @@ def main():
     print(f"  Task compilation: {'PASS' if task else 'FAIL'}")
     print(f"  LLM deliberation: {'PASS' if step else 'FAIL'}")
     print(f"  Policy enforcement: PASS")
+    print(f"  Runtime + WorldState: {'PASS' if runtime_result and runtime_result.world_state else 'FAIL'}")
     print(f"  Workflow execution: {'PASS' if workflow_result else 'FAIL'}")
     print(f"  Report generation: PASS")
     print()
 
-    all_pass = task is not None and step is not None and workflow_result is not None and workflow_result.status == "succeeded"
+    all_pass = (
+        task is not None
+        and step is not None
+        and runtime_result is not None
+        and runtime_result.world_state is not None
+        and workflow_result is not None
+        and workflow_result.status == "succeeded"
+    )
     if all_pass:
         print("  ALL VERIFICATIONS PASSED")
     else:

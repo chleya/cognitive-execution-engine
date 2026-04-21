@@ -44,7 +44,7 @@ python examples\workflow_demo.py
 Current expected result:
 
 ```text
-753+ passed, 2 skipped
+1125 passed, 2 skipped
 ```
 
 ### CLI Usage
@@ -73,12 +73,15 @@ cee calibrate
 python -m cee_core.web_api
 
 # Endpoints:
-# POST /tasks          - Execute task
-# GET  /state          - Get current state
-# GET  /events         - Get event log
-# WS   /ws/events      - Real-time event stream
-# GET  /reports/{id}   - Get execution report
-# GET  /docs           - Swagger UI
+# POST /tasks              - Execute task
+# GET  /state              - Get current state
+# POST /state              - Update state (policy-gated)
+# GET  /world              - Get WorldState (new architecture)
+# POST /world/commitment   - Execute commitment (new architecture)
+# GET  /reports/{run_id}   - Get execution report by run_id
+# GET  /events             - Get event log
+# WS   /ws/events          - Real-time event stream
+# GET  /docs               - Swagger UI
 ```
 
 ## Current Engine Surfaces
@@ -91,7 +94,7 @@ The engine currently provides:
 - approval semantics for gated state mutations
 - typed task and plan contracts
 - constrained LLM task compiler boundary
-- provider-neutral and env-gated provider boundaries (OpenAI, static)
+- provider-neutral and env-gated provider boundaries (OpenAI, Anthropic-compatible, static)
 - tool contracts, read-only runner, planner-proposed read-only tool execution, observation flow, explicit observation promotion
 - explicit domain context runtime entry
 - replayable run artifacts and JSON event artifacts
@@ -103,6 +106,22 @@ The engine currently provides:
 - state persistence with event replay and snapshot support
 - observability with metrics collection and debugging
 - external gateway with HTTP and webhook integration
+
+### New Architecture (World Model + Reality Commitment)
+
+The engine is migrating to a generative world layer + reality commitment layer:
+
+- `WorldState`: structured representation with entities, relations, hypotheses, anchored facts
+- `CommitmentEvent`: reality interaction events (observe/act/tool_contact/internal_commit)
+- `ModelRevisionEvent`: state corrections (expansion/correction/refinement)
+- `CommitmentPolicy`: observe default allow, act requires reversibility, irreversible blocked
+- `bridge.py`: compatible (not lossless) bidirectional State <-> WorldState conversion
+- API: `/world` GET, `/world/commitment` POST with full closed loop
+- API: `/reports/{run_id}` with RunArtifact lookup keyed by run_id
+- safe-by-default API (`auto_approve=False`)
+
+Migration phase: **Phase 1 bridge** (new architecture coexists with legacy).
+See `docs/migration_plan.md` for the full migration strategy.
 
 ## Example Flows
 

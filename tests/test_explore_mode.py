@@ -81,6 +81,6 @@ def test_redirect_proposed_in_run_result():
 
     if result.reasoning_step.chosen_action == "propose_redirect":
         assert result.redirect_proposed is True
-        assert len(result.plan.candidate_patches) == 0
+        assert len(result.plan.candidate_deltas) == 0
     else:
         assert result.redirect_proposed is False

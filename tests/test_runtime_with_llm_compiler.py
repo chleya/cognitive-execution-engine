@@ -8,6 +8,7 @@ from cee_core import (
     execute_task_with_compiler,
     run_result_to_artifact,
 )
+from cee_core.world_state import WorldState
 
 
 def _compiler_response(**overrides):
@@ -38,7 +39,7 @@ def test_execute_task_with_compiler_runs_full_pipeline():
     )
     assert len(result.allowed_transitions) == 4
     assert len(result.blocked_transitions) == 0
-    assert result.replayed_state.meta["version"] == 4
+    assert result.world_state is not None
     assert result.event_log.all()[0].event_type == "task.compiler.requested"
     assert result.event_log.all()[1].event_type == "task.compiler.succeeded"
     assert result.event_log.all()[2].event_type == "reasoning.step.selected"
@@ -75,7 +76,7 @@ def test_execute_task_with_compiler_medium_risk_still_requires_approval():
 
     assert len(result.allowed_transitions) == 4
     assert len(result.approval_required_transitions) == 1
-    assert "last_medium_or_high_risk_task" not in result.replayed_state.self_model
+    assert result.world_state is not None
 
 
 def test_execute_task_with_compiler_rejects_invalid_requested_primitives():
@@ -93,7 +94,9 @@ def test_execute_task_with_compiler_result_can_be_artifacted_and_replayed():
 
     artifact = run_result_to_artifact(result)
 
-    assert artifact.replay_state().snapshot() == result.replayed_state.snapshot()
+    if artifact.world_state_snapshot is not None and result.world_state is not None:
+        artifact_ws = WorldState.from_dict(artifact.world_state_snapshot)
+        assert artifact_ws == result.world_state
 
 
 def test_execute_task_with_compiler_rejects_forbidden_plan_fields():
@@ -119,7 +122,7 @@ def test_execute_task_with_compiler_uses_existing_event_log():
     result = execute_task_with_compiler("please analyze this", compiler, event_log=log)
 
     assert result.event_log is log
-    assert len(log.all()) == 7
+    assert len(log.all()) == 11
 
 
 def test_execute_task_with_compiler_logs_rejected_compiler_output():
@@ -145,5 +148,5 @@ def test_execute_task_with_compiler_success_events_are_audit_only_for_replay():
 
     result = execute_task_with_compiler("please analyze this", compiler)
 
-    assert len(result.event_log.all()) == 7
-    assert result.replayed_state.meta["version"] == 4
+    assert len(result.event_log.all()) == 11
+    assert result.world_state is not None

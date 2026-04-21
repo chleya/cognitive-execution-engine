@@ -75,7 +75,10 @@ def main() -> None:
     print(f"Allowed Transitions: {len(result.allowed_transitions)}")
     print(f"Blocked Transitions: {len(result.blocked_transitions)}")
     print(f"Approval Required: {len(result.approval_required_transitions)}")
-    print(f"Final State Version: {result.replayed_state.meta['version']}")
+    ws = result.world_state
+    if ws is not None:
+        print(f"WorldState ID: {ws.state_id}")
+        print(f"Provenance Refs: {len(ws.provenance_refs)}")
     print(f"Total Events: {metrics.total_event_count}")
     print()
     print("Quality Metrics:")
@@ -88,8 +91,10 @@ def main() -> None:
     print()
 
     artifact = run_result_to_artifact(result)
-    replayed = artifact.replay_state()
-    print(f"Artifact Replay Matches: {replayed.snapshot() == result.replayed_state.snapshot()}")
+    ws = result.world_state
+    if ws is not None:
+        print(f"WorldState ID: {ws.state_id}")
+        print(f"WorldState Goals: {', '.join(ws.dominant_goals) if ws.dominant_goals else '(none)'}")
 
     domain_pack = ctx.plugin_pack
     if domain_pack is not None:

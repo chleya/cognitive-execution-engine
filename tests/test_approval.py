@@ -2,99 +2,75 @@ import pytest
 
 from cee_core import (
     ApprovalDecision,
+    ApprovalGate,
+    ApprovalGateResult,
+    CommitmentEvent,
     EventLog,
-    State,
-    StatePatch,
-    approve_transition,
-    build_transition_for_patch,
-    reduce_event,
+    StaticApprovalProvider,
 )
+from cee_core.commitment import CommitmentEvent as CE
+from cee_core.revision import ModelRevisionEvent
+from cee_core.planner import PlanSpec, RevisionDelta, DeltaPolicyDecision, execute_plan
 
 
-def _self_model_transition():
-    return build_transition_for_patch(
-        StatePatch(
-            section="self_model",
-            key="capabilities",
-            op="set",
-            value={"planner": "bounded"},
-        ),
-        actor="planner",
-        reason="capability calibration update",
+def _self_model_commitment():
+    return CommitmentEvent(
+        event_id="ce-test-0",
+        source_state_id="",
+        commitment_kind="internal_commit",
+        intent_summary="test:self_model update",
+        action_summary="self_model capabilities",
+        success=False,
+        reversibility="reversible",
+        requires_approval=True,
     )
 
 
-def test_requires_approval_transition_is_blocked_without_decision():
-    event = _self_model_transition()
-
-    assert event.policy_decision.verdict == "requires_approval"
-    with pytest.raises(PermissionError):
-        reduce_event(State(), event)
+def test_requires_approval_commitment_is_not_successful():
+    ce = _self_model_commitment()
+    assert not ce.success
 
 
-def test_approval_decision_converts_transition_to_allowed_event():
-    event = _self_model_transition()
-    decision = ApprovalDecision(
-        transition_trace_id=event.trace_id,
-        verdict="approved",
-        decided_by="human:operator",
-        reason="reviewed calibration evidence",
-    )
+def test_approval_gate_auto_approves_self_model():
+    gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
+    ce = _self_model_commitment()
 
-    approved_event = approve_transition(event, decision)
-    state = reduce_event(State(), approved_event)
+    result = gate.resolve((ce,))
 
-    assert approved_event.policy_decision.verdict == "allow"
-    assert state.self_model["capabilities"] == {"planner": "bounded"}
-    assert state.meta["version"] == 1
+    assert result.approval_count == 1
+    assert result.rejection_count == 0
 
 
-def test_rejected_approval_decision_cannot_create_allowed_transition():
-    event = _self_model_transition()
-    decision = ApprovalDecision(
-        transition_trace_id=event.trace_id,
-        verdict="rejected",
-        decided_by="human:operator",
-        reason="insufficient evidence",
-    )
+def test_approval_gate_auto_rejects_self_model():
+    gate = ApprovalGate(provider=StaticApprovalProvider(verdict="rejected"))
+    ce = _self_model_commitment()
 
-    with pytest.raises(PermissionError):
-        approve_transition(event, decision)
+    result = gate.resolve((ce,))
 
-
-def test_approval_decision_must_match_transition_trace():
-    event = _self_model_transition()
-    decision = ApprovalDecision(
-        transition_trace_id="tr_other",
-        verdict="approved",
-        decided_by="human:operator",
-        reason="wrong trace",
-    )
-
-    with pytest.raises(ValueError):
-        approve_transition(event, decision)
+    assert result.approval_count == 0
+    assert result.rejection_count == 1
 
 
 def test_approval_audit_event_is_recorded_but_not_replayed_as_state():
-    event = _self_model_transition()
+    log = EventLog()
+    plan = PlanSpec.from_deltas(
+        objective="test",
+        candidate_deltas=[
+            RevisionDelta(delta_id="d1", target_kind="entity_update", target_ref="beliefs.test", before_summary="unknown", after_summary="ok", justification="test", raw_value="ok"),
+        ],
+    )
+    result = execute_plan(plan, event_log=log)
+
     decision = ApprovalDecision(
-        transition_trace_id=event.trace_id,
+        transition_trace_id="ce-test",
         verdict="approved",
         decided_by="human:operator",
-        reason="reviewed calibration evidence",
+        reason="reviewed evidence",
     )
-    approved_event = approve_transition(event, decision)
-    log = EventLog()
-
-    log.append(event)
     log.append(decision.to_event())
-    log.append(approved_event)
 
-    state = log.replay_state()
-    trace_events = log.by_trace(event.trace_id)
+    ws = log.replay_world_state()
+    all_events = log.all()
+    audit_events = [e for e in all_events if getattr(e, "event_type", "") == "approval.decision.recorded"]
 
-    assert state.self_model["capabilities"] == {"planner": "bounded"}
-    assert state.meta["version"] == 1
-    assert len(trace_events) == 3
-    assert trace_events[1].event_type == "approval.decision.recorded"
-
+    assert len(audit_events) == 1

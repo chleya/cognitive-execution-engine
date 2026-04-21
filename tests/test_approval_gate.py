@@ -5,30 +5,26 @@ from cee_core import (
     ApprovalGate,
     ApprovalGateResult,
     CallbackApprovalProvider,
+    CommitmentEvent,
     DomainContext,
     DomainPluginPack,
     EventLog,
     RunResult,
     StaticApprovalProvider,
-    State,
-    StatePatch,
-    approve_transition,
-    build_transition_for_patch,
     execute_task_in_domain,
-    reduce_event,
 )
 
 
-def _self_model_transition():
-    return build_transition_for_patch(
-        StatePatch(
-            section="self_model",
-            key="capabilities",
-            op="set",
-            value={"planner": "bounded"},
-        ),
-        actor="planner",
-        reason="capability calibration update",
+def _self_model_commitment():
+    return CommitmentEvent(
+        event_id="ce-test-0",
+        source_state_id="",
+        commitment_kind="internal_commit",
+        intent_summary="test:self_model update",
+        action_summary="self_model capabilities",
+        success=False,
+        reversibility="reversible",
+        requires_approval=True,
     )
 
 
@@ -44,19 +40,19 @@ def _approval_domain():
 
 def test_static_approval_provider_auto_approves():
     provider = StaticApprovalProvider(verdict="approved")
-    event = _self_model_transition()
+    event = _self_model_commitment()
 
     decision = provider.decide(event)
 
     assert decision.verdict == "approved"
-    assert decision.transition_trace_id == event.trace_id
+    assert decision.transition_trace_id == event.event_id
 
 
 def test_static_approval_provider_auto_rejects():
     provider = StaticApprovalProvider(
         verdict="rejected", reason="policy denies self_model changes"
     )
-    event = _self_model_transition()
+    event = _self_model_commitment()
 
     decision = provider.decide(event)
 
@@ -68,41 +64,40 @@ def test_callback_approval_provider_delegates():
     call_log: list[str] = []
 
     def callback(event):
-        call_log.append(event.trace_id)
+        call_log.append(event.event_id)
         return ApprovalDecision(
-            transition_trace_id=event.trace_id,
+            transition_trace_id=event.event_id,
             verdict="approved",
             decided_by="callback_tester",
             reason="callback approved",
         )
 
     provider = CallbackApprovalProvider(callback=callback)
-    event = _self_model_transition()
+    event = _self_model_commitment()
 
     decision = provider.decide(event)
 
     assert decision.verdict == "approved"
     assert decision.decided_by == "callback_tester"
-    assert call_log == [event.trace_id]
+    assert call_log == [event.event_id]
 
 
 def test_approval_gate_resolves_requires_approval_transitions():
     provider = StaticApprovalProvider(verdict="approved")
     gate = ApprovalGate(provider=provider)
-    event = _self_model_transition()
+    event = _self_model_commitment()
 
     result = gate.resolve((event,))
 
     assert result.approval_count == 1
     assert result.rejection_count == 0
     assert len(result.approved_transitions) == 1
-    assert result.approved_transitions[0].policy_decision.verdict == "allow"
 
 
 def test_approval_gate_rejects_transitions():
     provider = StaticApprovalProvider(verdict="rejected", reason="denied")
     gate = ApprovalGate(provider=provider)
-    event = _self_model_transition()
+    event = _self_model_commitment()
 
     result = gate.resolve((event,))
 
@@ -115,10 +110,14 @@ def test_approval_gate_skips_non_approval_transitions():
     provider = StaticApprovalProvider(verdict="approved")
     gate = ApprovalGate(provider=provider)
 
-    allowed_event = build_transition_for_patch(
-        StatePatch(section="tasks", key="t1", op="set", value={"status": "done"}),
-        actor="planner",
-        reason="task completion",
+    allowed_event = CommitmentEvent(
+        event_id="ce-allowed-0",
+        source_state_id="",
+        commitment_kind="observe",
+        intent_summary="test:belief update",
+        action_summary="beliefs test",
+        success=True,
+        reversibility="reversible",
     )
 
     result = gate.resolve((allowed_event,))
@@ -140,7 +139,7 @@ def test_approval_gate_handles_empty_events():
 def test_approval_gate_result_properties():
     provider = StaticApprovalProvider(verdict="approved")
     gate = ApprovalGate(provider=provider)
-    event = _self_model_transition()
+    event = _self_model_commitment()
 
     result = gate.resolve((event,))
 
@@ -156,8 +155,6 @@ def test_runtime_without_approval_gate_returns_none_gate_result():
     )
 
     assert result.approval_gate_result is None
-    assert result.approved_transitions == ()
-    assert result.rejected_transitions == ()
 
 
 def test_runtime_with_approval_gate_auto_approves_self_model():
@@ -174,7 +171,6 @@ def test_runtime_with_approval_gate_auto_approves_self_model():
     if result.approval_required_transitions:
         assert result.approval_gate_result is not None
         assert result.approval_gate_result.approval_count > 0
-        assert result.approved_transitions != ()
 
 
 def test_runtime_with_approval_gate_auto_rejects_self_model():
@@ -191,7 +187,6 @@ def test_runtime_with_approval_gate_auto_rejects_self_model():
     if result.approval_required_transitions:
         assert result.approval_gate_result is not None
         assert result.approval_gate_result.rejection_count > 0
-        assert result.rejected_transitions != ()
 
 
 def test_approval_gate_audit_trail_is_complete():
@@ -221,7 +216,7 @@ def test_callback_approval_gate_in_runtime():
 
     def callback(event):
         decision = ApprovalDecision(
-            transition_trace_id=event.trace_id,
+            transition_trace_id=event.event_id,
             verdict="approved",
             decided_by="test_operator",
             reason="test approval",

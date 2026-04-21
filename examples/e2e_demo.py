@@ -17,12 +17,16 @@ if str(SRC) not in sys.path:
 from cee_core import (
     ApprovalGate,
     BehavioralSnapshot,
+    CommitmentEvent,
     DomainContext,
     DomainPluginPack,
     EventLog,
+    ModelRevisionEvent,
+    RevisionDelta,
     RunResult,
     StaticApprovalProvider,
-    State,
+    WorldState,
+    evaluate_delta_policy,
     execute_task_in_domain,
     extract_behavioral_snapshot,
     run_calibration_cycle,
@@ -37,7 +41,7 @@ def _print_section(title: str) -> None:
 
 
 def demo_basic_run() -> EventLog:
-    _print_section("1. Basic Run: deterministic pipeline")
+    _print_section("1. Basic Run: deterministic pipeline (WorldState output)")
 
     log = EventLog()
     result = execute_task_in_domain("count to 3", DomainContext(domain_name="core"), event_log=log)
@@ -47,9 +51,16 @@ def demo_basic_run() -> EventLog:
     print(f"Allowed         : {len(result.allowed_transitions)}")
     print(f"Denied          : {len(result.denied_transitions)}")
     print(f"Redirect        : {result.redirect_proposed}")
+    print(f"Commitments     : {len(result.commitment_events)}")
+    print(f"Revisions       : {len(result.revision_events)}")
+
+    if result.world_state is not None:
+        print(f"WorldState ID   : {result.world_state.state_id}")
+        print(f"WorldState goals: {', '.join(result.world_state.dominant_goals) if result.world_state.dominant_goals else '(none)'}")
 
     artifact = run_result_to_artifact(result)
     print(f"Artifact bytes  : {len(artifact.dumps())}")
+    print(f"WS snapshot     : {'present' if artifact.world_state_snapshot else 'absent'}")
 
     return log
 
@@ -86,13 +97,6 @@ def demo_confidence_gate() -> EventLog:
     _print_section("3. Confidence Gate: low-confidence beliefs need approval")
 
     log = EventLog()
-    state = State()
-    state.beliefs["uncertain_claim"] = {
-        "content": "might be true",
-        "confidence": 0.3,
-        "provenance": ["weak_source"],
-    }
-
     result = execute_task_in_domain(
         "update beliefs uncertain_claim with new evidence",
         DomainContext(domain_name="core"),
@@ -129,22 +133,36 @@ def demo_calibration() -> None:
 
     log = EventLog()
 
-    from cee_core.events import DeliberationEvent, StateTransitionEvent
+    from cee_core.events import DeliberationEvent
     from cee_core.deliberation import ReasoningStep
-    from cee_core.policy import PolicyDecision
-    from cee_core.state import StatePatch
 
-    for section, verdict in [
-        ("goals", "allow"),
-        ("goals", "allow"),
-        ("beliefs", "allow"),
-        ("self_model", "requires_approval"),
-        ("policy", "deny"),
-        ("beliefs", "deny"),
-    ]:
-        patch = StatePatch(section=section, key="k1", op="set", value={"v": 1})
-        decision = PolicyDecision(verdict=verdict, reason=f"test {verdict}", policy_ref="demo")
-        log.append(StateTransitionEvent(patch=patch, policy_decision=decision, actor="demo", reason="demo"))
+    deltas_and_decisions = [
+        ("memory", "test_key", "entity_update", "allow"),
+        ("memory", "test_key2", "entity_update", "allow"),
+        ("beliefs", "test_belief", "entity_update", "allow"),
+        ("self_model", "capabilities", "self_update", "requires_approval"),
+        ("policy", "rule_1", "policy_update", "deny"),
+        ("beliefs", "denied_belief", "entity_update", "deny"),
+    ]
+
+    for section, key, target_kind, verdict in deltas_and_decisions:
+        delta = RevisionDelta(
+            delta_id=f"delta-{section}-{key}",
+            target_kind=target_kind,
+            target_ref=f"{section}.{key}",
+            before_summary="not set",
+            after_summary=f"test value for {key}",
+            justification=f"demo {verdict}",
+            raw_value={"v": 1},
+        )
+        decision = evaluate_delta_policy(delta)
+        ce = CommitmentEvent(
+            event_id=f"ce-{section}-{key}",
+            source_state_id="ws_0",
+            commitment_kind="observe" if verdict == "allow" else "act",
+            intent_summary=f"Demo {section}.{key} ({verdict})",
+        )
+        log.append(ce)
 
     step = ReasoningStep(
         task_id="demo",
@@ -158,13 +176,13 @@ def demo_calibration() -> None:
     )
     log.append(DeliberationEvent(reasoning_step=step))
 
-    state = State()
     gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
 
-    result = run_calibration_cycle(log, state, approval_gate=gate)
+    result = run_calibration_cycle(log, approval_gate=gate)
 
     print(f"Allow rate         : {result.snapshot.allow_rate:.1%}")
     print(f"Denial rate        : {result.snapshot.denial_rate:.1%}")
+    print(f"Commitment count   : {result.snapshot.commitment_count}")
     print(f"Redirect count     : {result.snapshot.redirect_count}")
     print(f"Calibration props  : {result.proposal_count}")
     print(f"Approved           : {result.approved_count}")

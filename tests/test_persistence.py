@@ -7,10 +7,9 @@ import tempfile
 import pytest
 
 from cee_core.persistence import StateStore, PersistenceSnapshot, EventStoreEntry
-from cee_core.state import State, StatePatch, apply_patch, replay
+from cee_core.world_state import WorldState
 from cee_core.event_log import EventLog
-from cee_core.events import Event, StateTransitionEvent
-from cee_core.policy import PolicyDecision
+from cee_core.events import Event
 
 
 class TestEventStoreEntry:
@@ -57,22 +56,20 @@ class TestEventStoreEntry:
 
 
 class TestPersistenceSnapshot:
-    def test_snapshot_creation(self):
-        state = State()
-        state.goals["active"] = ["task_1"]
-        state.meta["version"] = 1
+    def test_snapshot_creation_from_world_state(self):
+        ws = WorldState(state_id="ws_1", dominant_goals=("task_1",))
 
         log = EventLog()
 
-        snapshot = PersistenceSnapshot.from_state_and_log(state, log)
+        snapshot = PersistenceSnapshot.from_world_state_and_log(ws, log)
 
         assert snapshot.event_count == 0
-        assert snapshot.state["goals"]["active"] == ["task_1"]
-        assert snapshot.meta["version"] == 1
+        assert snapshot.state["dominant_goals"] == ["task_1"]
+        assert snapshot.meta["state_id"] == "ws_1"
 
     def test_snapshot_json_roundtrip(self):
         snapshot = PersistenceSnapshot(
-            state={"goals": {"active": ["task_1"]}},
+            state={"dominant_goals": ["task_1"]},
             event_count=5,
             last_event_type="state.patch.requested",
             meta={"version": 3},
@@ -94,24 +91,20 @@ class TestStateStore:
     def teardown_method(self):
         self.store.clear()
 
-    def test_save_and_load_state(self):
-        state = State()
-        state.goals["active"] = ["task_1"]
-        state.beliefs["test"] = "data"
-        state.meta["version"] = 5
+    def test_save_and_load_world_state(self):
+        ws = WorldState(state_id="ws_test", dominant_goals=("task_1",))
 
-        self.store.save_state(state)
-        restored = self.store.load_state()
+        self.store.save_world_state(ws)
+        restored = self.store.load_world_state()
 
-        assert restored.goals["active"] == ["task_1"]
-        assert restored.beliefs["test"] == "data"
-        assert restored.meta["version"] == 5
+        assert restored.state_id == "ws_test"
+        assert restored.dominant_goals == ("task_1",)
 
-    def test_load_state_from_empty_store(self):
-        restored = self.store.load_state()
+    def test_load_world_state_from_empty_store(self):
+        restored = self.store.load_world_state()
 
-        assert isinstance(restored, State)
-        assert restored.meta["version"] == 0
+        assert isinstance(restored, WorldState)
+        assert restored.state_id == "ws_0"
 
     def test_append_and_load_events(self):
         event = Event(
@@ -142,31 +135,21 @@ class TestStateStore:
         assert events[0].index == 0
         assert events[4].index == 4
 
-    def test_replay_state_from_events(self):
-        patch = StatePatch(
-            section="goals",
-            key="active",
-            op="set",
-            value=["task_1"],
-        )
-        event = StateTransitionEvent(
-            patch=patch,
-            policy_decision=PolicyDecision(
-                verdict="allow",
-                reason="test allow",
-                policy_ref="test_policy",
-            ),
-            actor="test",
-        )
+    def test_save_and_load_world_state_roundtrip(self):
+        ws = WorldState(state_id="ws_roundtrip")
 
-        self.store.append_event(event)
-        replayed = self.store.replay_state()
+        self.store.save_world_state(ws)
+        loaded = self.store.load_world_state()
 
-        assert replayed.goals.get("active") == ["task_1"]
+        assert loaded.state_id == "ws_roundtrip"
 
-    def test_save_and_load_snapshot(self):
-        state = State()
-        state.goals["active"] = ["task_1"]
+    def test_load_world_state_defaults_when_no_file(self):
+        loaded = self.store.load_world_state()
+
+        assert loaded.state_id == "ws_0"
+
+    def test_save_and_load_world_snapshot(self):
+        ws = WorldState(state_id="ws_snap", dominant_goals=("task_1",))
 
         log = EventLog()
         log.append(
@@ -177,16 +160,16 @@ class TestStateStore:
             )
         )
 
-        self.store.save_snapshot(state, log)
+        self.store.save_world_snapshot(ws, log)
         snapshot = self.store.load_snapshot()
 
         assert snapshot is not None
         assert snapshot.event_count == 1
-        assert snapshot.state["goals"]["active"] == ["task_1"]
+        assert snapshot.state["dominant_goals"] == ["task_1"]
 
     def test_clear_storage(self):
-        state = State()
-        self.store.save_state(state)
+        ws = WorldState(state_id="ws_clear")
+        self.store.save_world_state(ws)
         self.store.append_event(
             Event(
                 event_type="test",
@@ -202,32 +185,27 @@ class TestStateStore:
         assert not self.store.snapshot_file.exists()
 
     def test_get_storage_info(self):
-        state = State()
-        state.goals["active"] = ["task_1"]
-        self.store.save_state(state)
+        ws = WorldState(state_id="ws_info", dominant_goals=("task_1",))
+        self.store.save_world_state(ws)
 
         info = self.store.get_storage_info()
 
-        assert info["state_file_exists"] is True
+        assert info["world_state_file_exists"] is True
         assert info["event_count"] == 0
-        assert info["state"]["goals"]["active"] == ["task_1"]
+        assert info["world_state"]["dominant_goals"] == ["task_1"]
 
-    def test_state_file_persistence_across_instances(self):
-        """Test that state persists across store instances."""
-        state = State()
-        state.beliefs["key"] = "value"
-        state.meta["version"] = 10
+    def test_world_state_persistence_across_instances(self):
+        ws = WorldState(state_id="ws_persist", dominant_goals=("task_1",))
 
-        self.store.save_state(state)
+        self.store.save_world_state(ws)
 
         new_store = StateStore(self.temp_dir)
-        restored = new_store.load_state()
+        restored = new_store.load_world_state()
 
-        assert restored.beliefs["key"] == "value"
-        assert restored.meta["version"] == 10
+        assert restored.state_id == "ws_persist"
+        assert restored.dominant_goals == ("task_1",)
 
     def test_event_store_persistence_across_instances(self):
-        """Test that events persist across store instances."""
         for i in range(3):
             event = Event(
                 event_type=f"event_{i}",
@@ -243,15 +221,13 @@ class TestStateStore:
         assert events[0].index == 0
         assert events[2].index == 2
 
-    def test_replay_with_no_state_file(self):
-        """Test replay when no state file exists."""
-        replayed = self.store.replay_state()
+    def test_load_world_state_from_persistence(self):
+        loaded = self.store.load_world_state()
 
-        assert isinstance(replayed, State)
-        assert replayed.meta["version"] == 0
+        assert isinstance(loaded, WorldState)
+        assert loaded.state_id == "ws_0"
 
     def test_snapshot_load_returns_none_when_missing(self):
-        """Test that load_snapshot returns None when no snapshot exists."""
         snapshot = self.store.load_snapshot()
 
         assert snapshot is None

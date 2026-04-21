@@ -10,8 +10,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .commitment import CommitmentEvent
 from .event_log import EventLog
-from .events import DeliberationEvent, Event, StateTransitionEvent
+from .events import DeliberationEvent, Event
+from .revision import ModelRevisionEvent
 from .tools import ToolCallEvent, ToolResultEvent
 from .workflow import Workflow, WorkflowResult, StepResult
 
@@ -110,20 +112,32 @@ class ReportGenerator:
         if self.event_log is None:
             return []
 
-        transition_events = self.event_log.transition_events()
-        if not transition_events:
+        commitment_events = self.event_log.commitment_events()
+        revision_events = self.event_log.revision_events()
+
+        if not commitment_events and not revision_events:
             return []
 
         lines = []
-        for event in transition_events:
-            lines.append(f"- **Trace**: {event.trace_id}")
-            lines.append(f"  - **Actor**: {event.actor}")
-            lines.append(f"  - **Section**: {event.patch.section}")
-            lines.append(f"  - **Key**: {event.patch.key}")
-            lines.append(f"  - **Op**: {event.patch.op}")
-            lines.append(f"  - **Policy**: {event.policy_decision.verdict}")
-            if event.reason:
-                lines.append(f"  - **Reason**: {event.reason}")
+        for event in commitment_events:
+            lines.append(f"- **Commitment**: {event.event_id}")
+            lines.append(f"  - **Kind**: {event.commitment_kind}")
+            lines.append(f"  - **Intent**: {event.intent_summary}")
+            if event.requires_approval:
+                lines.append(f"  - **Requires Approval**: Yes")
+            if event.action_summary:
+                lines.append(f"  - **Action**: {event.action_summary}")
+            lines.append("")
+
+        for event in revision_events:
+            lines.append(f"- **Revision**: {event.revision_id}")
+            lines.append(f"  - **Kind**: {event.revision_kind}")
+            for delta in event.deltas:
+                lines.append(f"  - **Delta**: {delta.target_ref} ({delta.target_kind})")
+                lines.append(f"    - Before: {delta.before_summary}")
+                lines.append(f"    - After: {delta.after_summary}")
+            if event.revision_summary:
+                lines.append(f"  - **Summary**: {event.revision_summary}")
             lines.append("")
 
         return [ReportSection(heading="Decision Trace", content="\n".join(lines))]

@@ -12,9 +12,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .retrieval_types import RetrievalQuery
-from .memory_index import MemoryIndex
 from .retriever import Retriever, RetrievalResult
-from .state import State
+from .world_state import WorldState
 
 
 class ExecutionStage(Enum):
@@ -62,7 +61,7 @@ class ContextRestorer:
     def restore_for_planning(
         self,
         task: str,
-        state: State,
+        state: WorldState,
         domain_label: Optional[str] = None
     ) -> RestoredContext:
         """Restore context for the planning stage.
@@ -114,7 +113,7 @@ class ContextRestorer:
         self,
         plan: str,
         proposed_actions: str,
-        state: State,
+        state: WorldState,
         domain_label: Optional[str] = None
     ) -> RestoredContext:
         """Restore context for the verification stage.
@@ -168,7 +167,7 @@ class ContextRestorer:
         outcome: str,
         failure_mode: Optional[str],
         task: str,
-        state: State,
+        state: WorldState,
         domain_label: Optional[str] = None
     ) -> RestoredContext:
         """Restore context for the reflection stage.

@@ -18,4 +18,4 @@ def test_build_quality_report_computes_and_renders_in_one_step():
 
     assert "Quality Report" in report
     assert "Approval-required transitions  : 1" in report
-    assert "Blocked transitions            : 1" in report
+    assert "Blocked transitions            : 0" in report

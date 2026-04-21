@@ -64,15 +64,8 @@ def test_tool_call_events_are_audit_only_for_state_replay():
             registry,
         )
     )
-    state = log.replay_state()
+    ws = log.replay_world_state()
 
-    assert state.snapshot() == {
-        "memory": {},
-        "goals": {},
-        "beliefs": {},
-        "self_model": {},
-        "policy": {},
-        "domain_data": {},
-        "tool_affordances": {},
-        "meta": {"version": 0},
-    }
+    assert ws.state_id == "ws_0"
+    assert ws.dominant_goals == ()
+    assert ws.entities == ()

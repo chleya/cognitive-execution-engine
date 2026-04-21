@@ -44,7 +44,7 @@ class TestParseLLMPlanResponse:
 
         plan = parse_llm_plan_response(response, task)
 
-        assert len(plan.candidate_patches) == 2
+        assert len(plan.candidate_deltas) == 2
         assert len(plan.proposed_tool_calls) == 1
         assert plan.proposed_tool_calls[0].tool_name == "read_docs"
 
@@ -112,8 +112,8 @@ class TestPlanWithLLM:
 
         plan = plan_with_llm(task, compiler)
 
-        assert len(plan.candidate_patches) == 1
-        assert plan.candidate_patches[0].section == "goals"
+        assert len(plan.candidate_deltas) == 1
+        assert plan.candidate_deltas[0].target_kind == "goal_update"
 
     def test_plan_fallback_on_failure(self):
         class FailingCompiler:
@@ -126,7 +126,7 @@ class TestPlanWithLLM:
         plan = plan_with_llm(task, compiler, fallback_to_deterministic=True)
 
         assert plan is not None
-        assert len(plan.candidate_patches) > 0
+        assert len(plan.candidate_deltas) > 0
 
     def test_plan_raises_on_failure_without_fallback(self):
         class FailingCompiler:
@@ -162,7 +162,7 @@ class TestPlanWithLLM:
 
         plan = plan_with_llm(task, compiler, reasoning_step=step)
 
-        assert len(plan.candidate_patches) == 1
+        assert len(plan.candidate_deltas) == 1
 
 
 class TestProviderBackedPlanCompiler:
@@ -183,7 +183,7 @@ class TestProviderBackedPlanCompiler:
         response = compiler.compile_plan(task, context="")
 
         plan = parse_llm_plan_response(response, task)
-        assert len(plan.candidate_patches) == 1
+        assert len(plan.candidate_deltas) == 1
 
         events = log.all()
         assert any(e.event_type == "llm.plan_compiler.requested" for e in events)

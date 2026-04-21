@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Integration tests for precedent memory and uncertainty router in runtime."""
 
 import pytest
@@ -234,6 +235,6 @@ class TestCombinedIntegration:
         )
         
         # Replay should still work
-        replayed_state = result.event_log.replay_state()
-        assert replayed_state is not None
-        assert replayed_state.meta is not None
+        ws = result.event_log.replay_world_state()
+        assert ws is not None
+        assert ws.state_id is not None

@@ -2,12 +2,10 @@ import pytest
 
 from cee_core import (
     BeliefCandidate,
-    ConfidenceGateConfig,
-    PolicyDecision,
     ReflectionCandidate,
-    StatePatch,
-    evaluate_confidence_gate,
-    promote_belief_candidate_to_patch,
+    RevisionDelta,
+    evaluate_delta_policy,
+    promote_belief_candidate_to_delta,
 )
 
 
@@ -40,7 +38,7 @@ def test_belief_candidate_to_dict():
     assert d["extraction_source"] == "llm"
 
 
-def test_belief_candidate_promotion_creates_belief_patch():
+def test_belief_candidate_promotion_creates_belief_delta():
     candidate = BeliefCandidate(
         content="extracted fact",
         confidence=0.85,
@@ -50,16 +48,16 @@ def test_belief_candidate_promotion_creates_belief_patch():
         extraction_trace_id="trace_002",
     )
 
-    patch = promote_belief_candidate_to_patch(candidate, belief_key="fact_1")
+    delta = promote_belief_candidate_to_delta(candidate, belief_key="fact_1")
 
-    assert patch.section == "beliefs"
-    assert patch.key == "fact_1"
-    assert patch.op == "set"
-    assert patch.value["confidence"] == 0.85
-    assert patch.value["extraction_source"] == "llm_extractor"
+    assert delta.target_kind == "entity_update"
+    assert delta.target_ref == "beliefs.fact_1"
+    assert delta.raw_value["content"] == "extracted fact"
+    assert delta.raw_value["confidence"] == 0.85
+    assert delta.raw_value["extraction_source"] == "llm_extractor"
 
 
-def test_belief_candidate_patch_requires_policy():
+def test_belief_candidate_delta_passes_policy():
     candidate = BeliefCandidate(
         content="test",
         confidence=0.9,
@@ -69,15 +67,13 @@ def test_belief_candidate_patch_requires_policy():
         extraction_trace_id="t1",
     )
 
-    patch = promote_belief_candidate_to_patch(candidate, belief_key="k1")
+    delta = promote_belief_candidate_to_delta(candidate, belief_key="k1")
+    decision = evaluate_delta_policy(delta)
 
-    from cee_core import evaluate_patch_policy
-    decision = evaluate_patch_policy(patch)
-
-    assert decision.verdict == "allow"
+    assert decision.allowed
 
 
-def test_low_confidence_belief_candidate_escalated():
+def test_low_confidence_belief_candidate_delta_still_allowed_by_base_policy():
     candidate = BeliefCandidate(
         content="uncertain",
         confidence=0.3,
@@ -87,13 +83,11 @@ def test_low_confidence_belief_candidate_escalated():
         extraction_trace_id="t2",
     )
 
-    patch = promote_belief_candidate_to_patch(candidate, belief_key="uncertain")
-    base = PolicyDecision(verdict="allow", reason="ok", policy_ref="test")
-    beliefs = {"uncertain": patch.value}
+    delta = promote_belief_candidate_to_delta(candidate, belief_key="uncertain")
+    decision = evaluate_delta_policy(delta)
 
-    result = evaluate_confidence_gate(patch, base, beliefs)
-
-    assert result.verdict == "requires_approval"
+    assert decision.allowed
+    assert not decision.requires_approval
 
 
 def test_reflection_candidate_creation():
@@ -124,47 +118,18 @@ def test_reflection_candidate_to_dict():
     assert d["patterns_observed"] == ["p1"]
 
 
-def test_evidence_count_gate_escalates_insufficient_evidence():
-    patch = StatePatch(
-        section="beliefs",
-        key="weak_evidence",
-        op="set",
-        value={
-            "content": "test",
-            "confidence": 0.9,
-            "evidence_count": 1,
-        },
+def test_self_model_delta_from_belief_candidate_requires_approval():
+    delta = RevisionDelta(
+        delta_id="d1",
+        target_kind="self_update",
+        target_ref="self_model.capabilities",
+        before_summary="unknown",
+        after_summary="bounded",
+        justification="test self model update",
+        raw_value={"planner": "bounded"},
     )
-    base = PolicyDecision(verdict="allow", reason="ok", policy_ref="test")
-    beliefs = {"weak_evidence": {"confidence": 0.9, "evidence_count": 1}}
-    config = ConfidenceGateConfig(evidence_count_threshold=2)
 
-    result = evaluate_confidence_gate(patch, base, beliefs, config=config)
+    decision = evaluate_delta_policy(delta)
 
-    assert result.verdict == "requires_approval"
-    assert "evidence count" in result.reason
-
-
-def test_evidence_count_gate_allows_sufficient_evidence():
-    patch = StatePatch(
-        section="beliefs",
-        key="strong_evidence",
-        op="set",
-        value={
-            "content": "test",
-            "confidence": 0.9,
-            "evidence_count": 3,
-        },
-    )
-    base = PolicyDecision(verdict="allow", reason="ok", policy_ref="test")
-    beliefs = {"strong_evidence": {"confidence": 0.9, "evidence_count": 3}}
-    config = ConfidenceGateConfig(evidence_count_threshold=2)
-
-    result = evaluate_confidence_gate(patch, base, beliefs, config=config)
-
-    assert result.verdict == "allow"
-
-
-def test_evidence_count_threshold_validates():
-    with pytest.raises(ValueError):
-        ConfidenceGateConfig(evidence_count_threshold=0)
+    assert decision.requires_approval
+    assert not decision.allowed

@@ -7,6 +7,7 @@ from .image_control_generation import (
     IMAGE_CONTROL_PLUGIN_PACK,
     build_image_control_tool_registry,
 )
+from .rule_review import RULE_REVIEW_DOMAIN_NAME, RULE_REVIEW_PLUGIN_PACK, build_rule_review_tool_registry
 
 __all__ = [
     "DOCUMENT_ANALYSIS_DOMAIN_NAME",
@@ -17,4 +18,7 @@ __all__ = [
     "IMAGE_CONTROL_DOMAIN_NAME",
     "IMAGE_CONTROL_PLUGIN_PACK",
     "build_image_control_tool_registry",
+    "RULE_REVIEW_DOMAIN_NAME",
+    "RULE_REVIEW_PLUGIN_PACK",
+    "build_rule_review_tool_registry",
 ]

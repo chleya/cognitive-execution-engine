@@ -23,20 +23,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .runtime import execute_task_in_domain
 from .domain_context import DomainContext
-from .state import State, StatePatch, apply_patch
 from .event_log import EventLog
-from .events import Event, StateTransitionEvent
+from .commitment import CommitmentEvent
+from .revision import ModelRevisionEvent
 from .approval import ApprovalGate, StaticApprovalProvider
-from .policy import evaluate_patch_policy, build_transition_for_patch
-from .persistence import StateStore, load_state_from_file
+from .persistence import StateStore, load_world_state_from_file, save_world_state
 from .observability import ExecutionObserver, ExecutionPhase, DebugContext
-from .import_export import ImportExportManager, ExportPackage
+from .import_export import ImportExportManager
 from .handoff_report import build_handoff_report
 from .handoff_validator import validate_handoff_state_file
 from .calibration import run_calibration_cycle
 from .run_artifact import run_result_to_artifact
 from .report_generator import ReportGenerator
 from .config import CEEConfig, load_config
+from .world_state import WorldState
 
 import logging
 
@@ -47,7 +47,7 @@ class TaskRequest(BaseModel):
     """Task execution request."""
     task: str = Field(..., description="Task description to execute")
     domain: str = Field(default="core", description="Domain context name")
-    auto_approve: bool = Field(default=True, description="Auto-approve transitions")
+    auto_approve: bool = Field(default=False, description="Auto-approve transitions (must be explicitly enabled)")
 
 
 class TaskResponse(BaseModel):
@@ -58,17 +58,23 @@ class TaskResponse(BaseModel):
     metrics: Dict[str, Any]
 
 
-class StateUpdateRequest(BaseModel):
-    """State update request."""
-    section: str
-    key: str
-    value: Any
-    op: str = Field(default="set", description="Operation: set, append, merge, delete")
-
-
 class CalibrationRequest(BaseModel):
     """Calibration request."""
-    auto_approve: bool = Field(default=True)
+    auto_approve: bool = Field(default=False)
+
+
+class CommitmentRequest(BaseModel):
+    """Commitment execution request."""
+    commitment_kind: str = Field(default="observe", description="Kind: observe, act, tool_contact, internal_commit")
+    intent_summary: str = Field(default="", description="Summary of the commitment intent")
+    target_entity_ids: List[str] = Field(default_factory=list, description="Target entity IDs")
+    observation_summaries: List[str] = Field(default_factory=list, description="Observation summaries")
+    success: bool = Field(default=True, description="Whether the commitment succeeded")
+    external_result_summary: str = Field(default="", description="Summary of external result")
+    discarded_hypothesis_ids: List[str] = Field(default_factory=list, description="Hypothesis IDs to discard")
+    strengthened_hypothesis_ids: List[str] = Field(default_factory=list, description="Hypothesis IDs to strengthen")
+    new_anchor_fact_summaries: List[str] = Field(default_factory=list, description="New anchored fact summaries")
+    revision_summary: str = Field(default="", description="Summary of the revision")
 
 
 class ExportRequest(BaseModel):
@@ -77,48 +83,113 @@ class ExportRequest(BaseModel):
     domain: str = Field(default="core")
 
 
-# Global state store and event subscribers
-_state_store: Optional[StateStore] = None
-_event_subscribers: List[WebSocket] = []
-_task_queue: Dict[str, Dict[str, Any]] = {}
-_app_config: Optional[CEEConfig] = None
+
+def _get_store(request: Request) -> StateStore:
+    """Get the StateStore from app.state, initializing lazily if needed."""
+    store = getattr(request.app.state, "state_store", None)
+    if store is None:
+        config = getattr(request.app.state, "app_config", None)
+        if config is None:
+            config = load_config()
+            request.app.state.app_config = config
+        store = StateStore(config.persistence.storage_dir)
+        request.app.state.state_store = store
+    return store
 
 
-def _get_config_state_file_path() -> Path:
-    """Get the state file path from config."""
-    if _app_config is not None:
-        return Path(_app_config.persistence.state_file)
-    return Path("cee_state.json")
+def _get_config(request: Request) -> CEEConfig:
+    """Get the CEEConfig from app.state."""
+    return getattr(request.app.state, "app_config", None)
 
 
-async def _broadcast_event(event_data: Dict[str, Any]) -> None:
+async def _broadcast_event(event_data: Dict[str, Any], subscribers: List[WebSocket]) -> None:
     """Broadcast event to all WebSocket subscribers."""
     disconnected = []
-    for ws in _event_subscribers:
+    for ws in subscribers:
         try:
             await ws.send_json(event_data)
         except Exception:
             logger.warning("WebSocket broadcast failed", exc_info=True)
             disconnected.append(ws)
-    
+
     for ws in disconnected:
-        _event_subscribers.remove(ws)
+        if ws in subscribers:
+            subscribers.remove(ws)
 
 
-def _validate_path(file_path: str, allowed_dirs: Optional[List[Path]] = None) -> Path:
-    if allowed_dirs is None:
-        allowed_dirs = [Path.cwd().resolve(), Path("cee_storage").resolve()]
+def _build_metrics_from_artifact(artifact) -> Dict[str, Any]:
+    """Build a metrics summary from a RunArtifact for report generation."""
+    return {
+        "allowed": artifact.allowed_count,
+        "blocked": artifact.blocked_count,
+        "approval_required": artifact.approval_required_count,
+        "denied": artifact.denied_count,
+        "total_events": len(artifact.event_payloads),
+    }
 
-    resolved = Path(file_path).resolve()
 
-    for allowed_dir in allowed_dirs:
-        try:
-            resolved.relative_to(allowed_dir)
-            return resolved
-        except ValueError:
+def _rebuild_event_log_from_artifact(artifact) -> EventLog:
+    """Rebuild an EventLog from a RunArtifact's event payloads.
+
+    Attempts to deserialize each payload as its correct event type
+    (CommitmentEvent, ModelRevisionEvent, DeliberationEvent,
+    ToolCallEvent, ToolResultEvent) with fallback to generic Event.
+    """
+    from .events import DeliberationEvent
+    from .tools import ToolCallEvent, ToolResultEvent
+
+    log = EventLog()
+    for payload in artifact.event_payloads:
+        if not isinstance(payload, dict):
             continue
+        event_type = payload.get("event_type", "")
+        try:
+            if event_type == "commitment":
+                event = CommitmentEvent.from_dict(payload)
+                log.append(event)
+            elif event_type == "revision":
+                event = ModelRevisionEvent.from_dict(payload)
+                log.append(event)
+            elif event_type == "deliberation.step":
+                event = DeliberationEvent.from_dict(payload)
+                log.append(event)
+            elif event_type == "tool.call":
+                event = ToolCallEvent.from_dict(payload)
+                log.append(event)
+            elif event_type == "tool.result":
+                event = ToolResultEvent.from_dict(payload)
+                log.append(event)
+            else:
+                event = Event(
+                    event_type=event_type,
+                    payload=payload.get("payload", payload),
+                    actor=payload.get("actor", "unknown"),
+                )
+                log.append(event)
+        except Exception:
+            pass
+    return log
 
-    return None
+
+def _render_artifact_stub(artifact_data: Dict[str, Any], run_id: str) -> str:
+    """Render a minimal report stub from raw artifact data."""
+    counts = artifact_data.get("counts", {})
+    lines = [
+        f"# Run Report: {run_id}",
+        "",
+        "## Summary",
+        f"- Allowed: {counts.get('allowed', 0)}",
+        f"- Blocked: {counts.get('blocked', 0)}",
+        f"- Approval Required: {counts.get('approval_required', 0)}",
+        f"- Denied: {counts.get('denied', 0)}",
+        "",
+    ]
+    narration = artifact_data.get("narration_lines", [])
+    if narration:
+        lines.append("## Narration")
+        for line in narration:
+            lines.append(f"- {line}")
+    return "\n".join(lines)
 
 
 _EXEMPT_PATHS = frozenset({"/", "/health", "/docs", "/openapi.json"})
@@ -153,78 +224,86 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global _state_store, _app_config
-    
-    if _app_config is None:
-        _app_config = load_config()
-    
-    _state_store = StateStore(_app_config.persistence.storage_dir)
-    
-    state_file = Path(_app_config.persistence.state_file)
+    config = getattr(app.state, "app_config", None)
+    if config is None:
+        config = load_config()
+        app.state.app_config = config
+
+    store = StateStore(config.persistence.storage_dir)
+    app.state.state_store = store
+
+    state_file = Path(config.persistence.state_file)
     if state_file.exists():
         try:
-            _state_store.load_state()
+            store.load_world_state()
         except Exception:
-            logger.error("Failed to load state", exc_info=True)
-    
+            logger.error("Failed to load world state", exc_info=True)
+
+    app.state.event_subscribers = []
+    app.state.task_queue = {}
+
     yield
-    
-    for ws in _event_subscribers:
+
+    subscribers = getattr(app.state, "event_subscribers", [])
+    for ws in subscribers:
         try:
             await ws.close()
         except Exception:
             logger.debug("WebSocket close failed")
-    _event_subscribers.clear()
+    subscribers.clear()
 
 
 def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
     """Create and configure the FastAPI application."""
-    global _app_config
-    
-    if config is not None:
-        _app_config = config
-    
+    if config is None:
+        config = load_config()
+
     app = FastAPI(
         title="Cognitive Execution Engine API",
         description="REST API and WebSocket interface for CEE",
         version="1.0.0",
         lifespan=lifespan,
     )
-    
-    if _app_config is not None:
-        app.add_middleware(APIKeyMiddleware, api_key_env=_app_config.api.api_key_env)
-    else:
-        app.add_middleware(APIKeyMiddleware, api_key_env="CEE_API_KEY")
+
+    app.state.app_config = config
+
+    app.add_middleware(APIKeyMiddleware, api_key_env=config.api.api_key_env)
 
     @app.get("/health")
-    async def health_check():
+    async def health_check(request: Request):
         """Health check endpoint."""
+        subscribers = getattr(request.app.state, "event_subscribers", [])
+        task_queue = getattr(request.app.state, "task_queue", {})
         return {
             "status": "healthy",
             "version": "1.0.0",
-            "subscribers": len(_event_subscribers),
-            "pending_tasks": len(_task_queue),
+            "subscribers": len(subscribers),
+            "pending_tasks": len(task_queue),
         }
 
     @app.post("/tasks", response_model=TaskResponse)
-    async def execute_task(request: TaskRequest, background_tasks: BackgroundTasks):
+    async def execute_task(request: TaskRequest, background_tasks: BackgroundTasks, http_request: Request):
         """Execute a task through the CEE pipeline."""
         import uuid
-        
+
         task_id = str(uuid.uuid4())[:8]
-        
-        domain = DomainContext(domain_name=request.domain)
+        store = _get_store(http_request)
+        subscribers = getattr(http_request.app.state, "event_subscribers", [])
+
+        config = _get_config(http_request)
+        event_fmt = config.policy.event_format if config else "new"
+        domain = DomainContext(domain_name=request.domain, event_format=event_fmt)
         log = EventLog()
-        
+
         gate = None
         if request.auto_approve:
             gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
-        
+
         observer = ExecutionObserver(
             debug_context=DebugContext(verbose_logging=False)
         )
         observer.metrics.start_phase(ExecutionPhase.COMPILATION)
-        
+
         try:
             result = execute_task_in_domain(
                 request.task,
@@ -232,27 +311,25 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
                 event_log=log,
                 approval_gate=gate,
             )
-            
+
             observer.metrics.end_phase(ExecutionPhase.COMPILATION)
-            
+
             event_count = len(list(log.all()))
-            
-            # Broadcast events
+
             for event in log.all():
                 event_data = {
                     "task_id": task_id,
                     "event_type": event.event_type,
                     "payload": event.to_dict() if hasattr(event, 'to_dict') else {},
-                    "actor": event.actor,
+                    "actor": getattr(event, 'actor', 'system'),
                 }
-                await _broadcast_event(event_data)
-                
-                if _state_store is not None:
-                    try:
-                        _state_store.append_event(event)
-                    except Exception:
-                        logger.warning("Failed to persist event", exc_info=True)
-            
+                await _broadcast_event(event_data, subscribers)
+
+                try:
+                    store.append_event(event)
+                except Exception:
+                    logger.warning("Failed to persist event", exc_info=True)
+
             response_data = {
                 "task": {
                     "objective": result.task.objective,
@@ -260,21 +337,39 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
                     "risk_level": result.task.risk_level,
                 },
                 "events": event_count,
-                "allowed_transitions": len(result.allowed_transitions),
+                "allowed_transitions": result.allowed_count,
                 "denied_transitions": len(result.denied_transitions),
-                "approval_required": len(result.approval_required_transitions),
+                "approval_required": result.requires_approval_count,
                 "redirect_proposed": result.redirect_proposed,
+                "commitment_events": len(result.commitment_events),
+                "revision_events": len(result.revision_events),
+                "world_state": result.world_state.to_dict() if result.world_state else None,
             }
-            
+
             metrics = observer.metrics.get_summary()
-            
-            # Save state
-            if _state_store is not None:
+
+            if result.world_state is not None:
                 try:
-                    _state_store.save_state(result.replayed_state)
+                    save_world_state(store, result.world_state)
                 except Exception:
-                    logger.error("Failed to save state", exc_info=True)
-            
+                    logger.error("Failed to save WorldState", exc_info=True)
+
+            try:
+                from .persistence import append_commitment_event, append_revision_event
+                for ce in result.commitment_events:
+                    append_commitment_event(store, ce)
+                for rev in result.revision_events:
+                    append_revision_event(store, rev)
+            except Exception:
+                logger.warning("Failed to persist commitment/revision events", exc_info=True)
+
+            try:
+                from .run_artifact import run_result_to_artifact
+                artifact = run_result_to_artifact(result)
+                store.save_run_artifact(task_id, artifact.to_dict())
+            except Exception:
+                logger.warning("Failed to save run artifact", exc_info=True)
+
             return TaskResponse(
                 task_id=task_id,
                 status="completed",
@@ -284,126 +379,83 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/state")
-    async def get_state():
-        """Get current engine state."""
-        global _state_store
-        if _state_store is None:
-            _state_store = StateStore("cee_storage")
-        
-        try:
-            state = _state_store.load_state()
-            return state.snapshot()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    @app.get("/reports/{run_id}")
+    async def get_execution_report(run_id: str, request: Request):
+        """Get Markdown execution report for a specific run.
 
-    @app.post("/state")
-    async def update_state(request: StateUpdateRequest):
-        """Update engine state through policy-gated patch path."""
-        if _state_store is None:
-            raise HTTPException(status_code=500, detail="State store not initialized")
-        
+        Only returns a report if a RunArtifact exists for this run_id.
+        There is no fallback to global event data — a report is bound
+        to exactly one run, identified by run_id.
+        """
+        store = _get_store(request)
+
         try:
-            state = _state_store.load_state()
-            
-            if request.op not in ("set", "append"):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Only 'set' and 'append' operations are supported through the patch path. Got: {request.op}"
-                )
-            
-            patch = StatePatch(
-                section=request.section,
-                key=request.key,
-                op=request.op,
-                value=request.value,
-            )
-            
-            policy_decision = evaluate_patch_policy(patch)
-            
-            if policy_decision.blocked:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Policy blocked: {policy_decision.reason} (ref: {policy_decision.policy_ref})"
-                )
-            
-            new_state = apply_patch(state, patch)
-            
-            _state_store.save_state(new_state)
-            
-            return {
-                "status": "succeeded",
-                "section": request.section,
-                "key": request.key,
-                "op": request.op,
-                "policy_verdict": policy_decision.verdict,
-                "policy_reason": policy_decision.reason,
-            }
+            artifact_data = store.load_run_artifact(run_id)
+
+            if artifact_data is not None:
+                from .run_artifact import RunArtifact
+                try:
+                    artifact = RunArtifact.from_dict(artifact_data)
+
+                    workflow = None
+                    workflow_result = None
+                    if artifact.workflow_data is not None:
+                        try:
+                            from .workflow import Workflow
+                            workflow = Workflow.from_dict(artifact.workflow_data)
+                        except Exception:
+                            pass
+                    if artifact.workflow_result_data is not None:
+                        try:
+                            from .workflow import WorkflowResult
+                            workflow_result = WorkflowResult.from_dict(artifact.workflow_result_data)
+                        except Exception:
+                            pass
+
+                    gen = ReportGenerator(
+                        event_log=_rebuild_event_log_from_artifact(artifact),
+                        metrics_summary=_build_metrics_from_artifact(artifact),
+                        workflow=workflow,
+                        workflow_result=workflow_result,
+                    )
+                    md = gen.render_markdown(run_id=run_id)
+                except Exception:
+                    md = _render_artifact_stub(artifact_data, run_id)
+
+                from fastapi.responses import PlainTextResponse
+                return PlainTextResponse(content=md, media_type="text/markdown")
+
+            raise HTTPException(status_code=404, detail=f"No RunArtifact found for run_id: {run_id}")
         except HTTPException:
             raise
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/report")
-    async def get_report(state_file: str = "cee_state.json"):
-        """Get handoff readiness report."""
-        validated = _validate_path(state_file)
-        if validated is None:
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied: path outside allowed directories",
-            )
-
-        if not validated.exists():
-            raise HTTPException(status_code=404, detail=f"State file not found: {state_file}")
-        
-        try:
-            report = build_handoff_report(str(validated))
-            validation = validate_handoff_state_file(str(validated))
-            
-            return {
-                "report": report,
-                "validation": {
-                    "is_valid": validation.is_valid,
-                    "errors": validation.errors,
-                    "warnings": validation.warnings,
-                },
-            }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/reports/{run_id}")
-    async def get_execution_report(run_id: str):
-        """Get Markdown execution report for a run."""
-        try:
-            gen = ReportGenerator()
-            md = gen.render_markdown(run_id=run_id)
-            from fastapi.responses import PlainTextResponse
-            return PlainTextResponse(content=md, media_type="text/markdown")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/calibrate")
-    async def calibrate(request: CalibrationRequest):
+    async def calibrate(request: CalibrationRequest, http_request: Request):
         """Run self-model calibration cycle."""
-        state_file = _get_config_state_file_path()
-        state = State()
-        
+        config = _get_config(http_request)
+        state_file = Path(config.persistence.state_file) if config else Path("cee_state.json")
+        self_model: dict[str, object] = {}
+
         if state_file.exists():
             try:
-                state = load_state_from_file(state_file)
+                ws = load_world_state_from_file(state_file)
+                self_model = {
+                    "capabilities": list(ws.self_capability_summary),
+                    "limits": list(ws.self_limit_summary),
+                    "reliability": ws.self_reliability_estimate,
+                }
             except Exception:
-                logger.error("Failed to load state for calibration", exc_info=True)
-        
+                logger.error("Failed to load world state for calibration", exc_info=True)
+
         log = EventLog()
         gate = None
         if request.auto_approve:
             gate = ApprovalGate(provider=StaticApprovalProvider(verdict="approved"))
-        
+
         try:
-            result = run_calibration_cycle(log, state, approval_gate=gate)
+            result = run_calibration_cycle(log, current_self_model=self_model, approval_gate=gate)
             
             return {
                 "total_transitions": result.snapshot.total_transitions,
@@ -418,19 +470,20 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/export")
-    async def export_state(request: ExportRequest):
+    async def export_state(request: ExportRequest, http_request: Request):
         """Export execution state."""
-        state_file = _get_config_state_file_path()
+        config = _get_config(http_request)
+        state_file = Path(config.persistence.state_file) if config else Path("cee_state.json")
         if not state_file.exists():
             raise HTTPException(status_code=404, detail="No state file found")
-        
+
         try:
-            state = State()
+            ws = load_world_state_from_file(state_file)
             log = EventLog()
-            
+
             manager = ImportExportManager()
             package = manager.export_execution(
-                state,
+                ws,
                 log,
                 source_name=request.source_name,
                 domain_name=request.domain,
@@ -447,27 +500,28 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
     async def websocket_events(websocket: WebSocket):
         """WebSocket endpoint for real-time event streaming."""
         await websocket.accept()
-        _event_subscribers.append(websocket)
-        
+        subscribers = getattr(websocket.app.state, "event_subscribers", [])
+        subscribers.append(websocket)
+
         try:
             while True:
-                # Keep connection alive
                 await websocket.receive_text()
         except WebSocketDisconnect:
-            _event_subscribers.remove(websocket)
+            if websocket in subscribers:
+                subscribers.remove(websocket)
         except Exception:
             logger.debug("WebSocket events connection closed unexpectedly")
-            if websocket in _event_subscribers:
-                _event_subscribers.remove(websocket)
+            if websocket in subscribers:
+                subscribers.remove(websocket)
 
     @app.websocket("/ws/tasks/{task_id}")
     async def websocket_task(websocket: WebSocket, task_id: str):
         """WebSocket endpoint for task-specific updates."""
         await websocket.accept()
-        
-        # Send any queued updates for this task
-        if task_id in _task_queue:
-            await websocket.send_json(_task_queue[task_id])
+        task_queue = getattr(websocket.app.state, "task_queue", {})
+
+        if task_id in task_queue:
+            await websocket.send_json(task_queue[task_id])
         
         try:
             while True:
@@ -478,20 +532,164 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
             logger.debug("WebSocket task connection closed")
 
     @app.get("/tasks")
-    async def list_tasks():
+    async def list_tasks(request: Request):
         """List recent tasks."""
-        return {
-            "tasks": [],
-            "total": 0,
-        }
+        store = _get_store(request)
+        try:
+            run_ids = store.list_run_ids()
+            return {
+                "tasks": [{"run_id": rid} for rid in run_ids],
+                "total": len(run_ids),
+            }
+        except Exception:
+            return {
+                "tasks": [],
+                "total": 0,
+            }
+
+    @app.get("/world")
+    async def get_world_state(request: Request):
+        """Get current engine state as WorldState."""
+        from .persistence import load_world_state
+
+        store = _get_store(request)
+
+        try:
+            ws = load_world_state(store)
+            return ws.to_dict()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/world/commitment")
+    async def execute_commitment(request: CommitmentRequest, http_request: Request):
+        """Execute a commitment through the new architecture with full closed loop.
+
+        Flow: create commitment -> evaluate policy -> persist commitment ->
+              derive revision -> persist revision -> apply revision to WorldState ->
+              save WorldState.
+        """
+        from .commitment import (
+            make_observation_commitment, make_act_commitment, make_tool_contact_commitment,
+            complete_commitment,
+        )
+        from .commitment_policy import evaluate_commitment_policy
+        from .revision import revise_from_commitment
+        from .persistence import (
+            save_world_state, load_world_state,
+            append_commitment_event, append_revision_event,
+        )
+
+        store = _get_store(http_request)
+
+        try:
+            ws = load_world_state(store)
+
+            valid_kinds = {"observe", "act", "tool_contact", "internal_commit"}
+            if request.commitment_kind not in valid_kinds:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown commitment kind: {request.commitment_kind}",
+                )
+
+            policy_decision = evaluate_commitment_policy(request.commitment_kind)
+            if not policy_decision.allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Commitment policy blocked: {policy_decision.reason}",
+                )
+
+            if request.commitment_kind == "observe":
+                ce = make_observation_commitment(
+                    ws,
+                    event_id=f"ce-api-{int(time.monotonic()*1000)}",
+                    intent_summary=request.intent_summary,
+                    target_entity_ids=tuple(request.target_entity_ids),
+                )
+            elif request.commitment_kind == "act":
+                ce = make_act_commitment(
+                    ws,
+                    event_id=f"ce-api-{int(time.monotonic()*1000)}",
+                    intent_summary=request.intent_summary,
+                    action_summary=request.intent_summary,
+                    target_entity_ids=tuple(request.target_entity_ids),
+                )
+            elif request.commitment_kind == "tool_contact":
+                ce = make_tool_contact_commitment(
+                    ws,
+                    event_id=f"ce-api-{int(time.monotonic()*1000)}",
+                    intent_summary=request.intent_summary,
+                    action_summary=request.intent_summary,
+                    target_entity_ids=tuple(request.target_entity_ids),
+                )
+            else:
+                ce = make_observation_commitment(
+                    ws,
+                    event_id=f"ce-api-{int(time.monotonic()*1000)}",
+                    intent_summary=request.intent_summary,
+                    target_entity_ids=tuple(request.target_entity_ids),
+                )
+
+            ce = complete_commitment(
+                ce,
+                success=request.success,
+                external_result_summary=request.external_result_summary,
+                observation_summaries=tuple(request.observation_summaries),
+            )
+
+            append_commitment_event(store, ce)
+
+            rev = None
+            new_ws = ws
+            if request.discarded_hypothesis_ids or request.strengthened_hypothesis_ids or request.new_anchor_fact_summaries:
+                rev, new_ws = revise_from_commitment(
+                    ws,
+                    ce,
+                    revision_id=f"rev-api-{int(time.monotonic()*1000)}",
+                    resulting_state_id=f"ws_{int(ws.state_id.split('_')[-1]) + 1}" if ws.state_id.startswith("ws_") else "ws_1",
+                    discarded_hypothesis_ids=tuple(request.discarded_hypothesis_ids),
+                    strengthened_hypothesis_ids=tuple(request.strengthened_hypothesis_ids),
+                    new_anchor_fact_summaries=tuple(request.new_anchor_fact_summaries),
+                    revision_summary=request.revision_summary,
+                )
+                append_revision_event(store, rev)
+
+            save_world_state(store, new_ws)
+
+            result = {
+                "status": "completed",
+                "commitment": ce.to_dict(),
+                "policy_decision": {
+                    "allowed": policy_decision.allowed,
+                    "reason": policy_decision.reason,
+                    "requires_approval": policy_decision.requires_approval,
+                },
+                "world_state_id": new_ws.state_id,
+                "anchored_facts_count": len(new_ws.anchored_fact_summaries),
+                "active_hypotheses_count": len(new_ws.active_hypotheses()),
+            }
+
+            if rev is not None:
+                result["revision"] = {
+                    "revision_id": rev.revision_id,
+                    "revision_kind": rev.revision_kind,
+                    "deltas_count": len(rev.deltas),
+                }
+
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/metrics")
-    async def get_metrics():
+    async def get_metrics(request: Request):
         """Get engine metrics."""
+        subscribers = getattr(request.app.state, "event_subscribers", [])
+        task_queue = getattr(request.app.state, "task_queue", {})
         return {
             "uptime_seconds": time.monotonic(),
-            "subscribers": len(_event_subscribers),
-            "pending_tasks": len(_task_queue),
+            "subscribers": len(subscribers),
+            "pending_tasks": len(task_queue),
         }
 
     @app.get("/")

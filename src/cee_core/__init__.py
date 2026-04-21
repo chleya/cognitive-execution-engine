@@ -8,7 +8,6 @@ from .approval import (
     ApprovalProvider,
     CallbackApprovalProvider,
     StaticApprovalProvider,
-    approve_transition,
 )
 from .anthropic_compatible_provider import (
     ANTHROPIC_COMPAT_BASE_URL_ENV,
@@ -24,11 +23,10 @@ from .artifacts import (
     dumps_event_payloads,
     events_to_payloads,
     loads_event_payloads,
-    replay_event_payload_artifact,
 )
 from .calibration import (
     CalibrationResult,
-    calibration_proposal_to_patch,
+    calibration_proposal_to_delta,
     run_calibration_cycle,
 )
 from .change_test import (
@@ -37,11 +35,9 @@ from .change_test import (
     evaluate_change_test,
 )
 from .audit_policy import CompilerAuditPolicy
-from .confidence_gate import ConfidenceGateConfig, evaluate_confidence_gate, extract_belief_confidence
-from .belief_update import build_belief_payload, promote_observation_to_belief_patch
+from .belief_update import build_belief_payload, promote_observation_to_belief_delta
 from .deliberation import NextAction, ReasoningChain, ReasoningStep, deliberate_chain, deliberate_next_action
 from .domain_context import DomainContext, build_domain_context
-from .domain_policy import evaluate_patch_policy_in_domain
 from .domain_plugins import (
     ConnectorSpec,
     DomainPluginPack,
@@ -52,10 +48,8 @@ from .domain_plugins import (
 )
 from .event_log import (
     EventLog,
-    replay_serialized_transition_events,
-    replay_transition_events,
 )
-from .events import DeliberationEvent, Event, StateTransitionEvent
+from .events import CommitmentKind, DeliberationEvent, Event
 from .failure_modes import (
     FailureMode,
     FailureRecord,
@@ -117,8 +111,8 @@ from .observations import (
     ReflectionCandidate,
     build_observation_event,
     observation_from_tool_result,
-    promote_belief_candidate_to_patch,
-    promote_observation_to_patch,
+    promote_belief_candidate_to_delta,
+    promote_observation_to_delta,
 )
 from .openai_provider import (
     OPENAI_DEFAULT_MODEL,
@@ -129,8 +123,15 @@ from .openai_provider import (
     openai_responses_task_compiler_transport,
     openai_responses_task_compiler_transport_with_client,
 )
-from .planner import PlanExecutionResult, PlanSpec, execute_plan, plan_from_task
-from .policy import PolicyDecision, build_transition_for_patch, evaluate_patch_policy
+from .planner import (
+    DeltaPolicyDecision,
+    PlanExecutionResult,
+    PlanSpec,
+    evaluate_delta_policy,
+    evaluate_delta_policy_in_domain,
+    execute_plan,
+    plan_from_task,
+)
 from .runtime import (
     RunResult,
     execute_task,
@@ -142,17 +143,14 @@ from .runtime import (
 from .run_artifact import (
     RUN_ARTIFACT_SCHEMA_VERSION,
     RunArtifact,
-    replay_run_artifact_json,
     run_result_to_artifact,
 )
 from .schemas import (
+    COMMITMENT_POLICY_SCHEMA_VERSION,
     DELIBERATION_EVENT_SCHEMA_VERSION,
-    PATCH_SCHEMA_VERSION,
     PLAN_SCHEMA_VERSION,
-    POLICY_DECISION_SCHEMA_VERSION,
     REASONING_STEP_SCHEMA_VERSION,
     SCHEMA_MAJOR_VERSION,
-    STATE_TRANSITION_EVENT_SCHEMA_VERSION,
     TASK_SCHEMA_VERSION,
     require_schema_version,
 )
@@ -164,7 +162,6 @@ from .self_observation import (
     propose_self_model_calibration,
     reflect_and_redirect,
 )
-from .state import State, StatePatch, apply_patch, reduce_event, replay
 from .tasks import TaskLevel, TaskSpec, classify_task_level, compile_task
 from .tool_runner import InMemoryReadOnlyToolRunner, ReadToolHandler
 from .tool_observation_flow import (
@@ -247,6 +244,9 @@ from .persistence import (
     StateStore,
     PersistenceSnapshot,
     EventStoreEntry,
+    load_world_state_from_file,
+    save_world_state,
+    load_world_state,
 )
 from .observability import (
     ExecutionMetricsCollector,
@@ -271,6 +271,64 @@ from .import_export import (
     ExportPackage,
     ExportManifest,
 )
+from .world_schema import (
+    Confidence,
+    RevisionDelta,
+    RevisionTargetKind,
+    WorldEntity,
+    WorldHypothesis,
+    WorldRelation,
+    WORLD_SCHEMA_VERSION,
+)
+from .world_state import (
+    WorldState,
+    add_anchor_facts,
+    add_entity,
+    add_hypothesis_to_world,
+    add_relation,
+    add_tension,
+    remove_entity,
+    resolve_tension,
+    update_entity,
+    update_hypothesis_status,
+    update_self_model,
+    WORLD_STATE_SCHEMA_VERSION,
+)
+from .commitment import (
+    CommitmentEvent,
+    CommitmentKind as FullCommitmentKind,
+    Reversibility,
+    complete_commitment,
+    make_act_commitment,
+    make_observation_commitment,
+    make_tool_contact_commitment,
+    COMMITMENT_SCHEMA_VERSION,
+)
+from .commitment_policy import (
+    CommitmentPolicy,
+    CommitmentPolicyDecision,
+    DefaultCommitmentPolicy,
+    evaluate_commitment_policy,
+)
+from .revision import (
+    ModelRevisionEvent,
+    RevisionKind,
+    revise_from_commitment,
+    REVISION_SCHEMA_VERSION,
+)
+from .hypothesis_engine import (
+    HypothesisCandidate,
+    generate_from_tension,
+    generate_from_conflict,
+    rank_hypotheses,
+)
+from .revision_policy import (
+    DefaultRevisionPolicy,
+    RevisionPolicy,
+    RevisionPolicyDecision,
+    evaluate_revision_policy,
+    REVISION_POLICY_SCHEMA_VERSION,
+)
 
 __all__ = [
     "ApprovalAuditEvent",
@@ -284,16 +342,12 @@ __all__ = [
     "ANTHROPIC_COMPAT_DEFAULT_MODEL",
     "ANTHROPIC_COMPAT_ENV_KEY",
     "ANTHROPIC_COMPAT_MODEL_ENV",
-    "approve_transition",
     "anthropic_compatible_messages_transport",
     "CalibrationResult",
     "ChangeProposal",
     "ChangeTestResult",
     "CompilerAuditPolicy",
-    "ConfidenceGateConfig",
     "evaluate_change_test",
-    "evaluate_confidence_gate",
-    "extract_belief_confidence",
     "DomainContext",
     "ConnectorSpec",
     "DomainPluginPack",
@@ -341,16 +395,15 @@ __all__ = [
     "build_domain_context",
     "build_handoff_report",
     "assess_handoff_stage_gates",
-    "evaluate_patch_policy_in_domain",
     "build_anthropic_compatible_task_compiler_provider",
     "build_openai_task_compiler_provider",
     "build_observation_event",
     "build_quality_report",
-    "StateTransitionEvent",
+    "CommitmentKind",
+    "DeltaPolicyDecision",
     "PlanExecutionResult",
     "PlanSpec",
     "PlannerToolExecutionResult",
-    "PolicyDecision",
     "QualityGateCheck",
     "QualityGateResult",
     "QualityMetrics",
@@ -359,13 +412,11 @@ __all__ = [
     "RunResult",
     "RunArtifact",
     "DELIBERATION_EVENT_SCHEMA_VERSION",
-    "PATCH_SCHEMA_VERSION",
+    "COMMITMENT_POLICY_SCHEMA_VERSION",
     "PLAN_SCHEMA_VERSION",
-    "POLICY_DECISION_SCHEMA_VERSION",
     "REASONING_STEP_SCHEMA_VERSION",
     "RUN_ARTIFACT_SCHEMA_VERSION",
     "SCHEMA_MAJOR_VERSION",
-    "STATE_TRANSITION_EVENT_SCHEMA_VERSION",
     "TASK_SCHEMA_VERSION",
     "TaskLevel",
     "TaskSpec",
@@ -378,7 +429,6 @@ __all__ = [
     "ToolResultEvent",
     "ToolObservationFlowResult",
     "ToolSpec",
-    "build_transition_for_patch",
     "build_task_compiler_prompt",
     "build_tool_call_event",
     "compile_task",
@@ -387,7 +437,8 @@ __all__ = [
     "compile_task_with_llm_adapter",
     "describe_failure_mode",
     "default_primitives_for_task_kind",
-    "evaluate_patch_policy",
+    "evaluate_delta_policy",
+    "evaluate_delta_policy_in_domain",
     "evaluate_tool_call_policy",
     "execute_task",
     "execute_task_in_domain",
@@ -410,20 +461,12 @@ __all__ = [
     "openai_responses_task_compiler_transport",
     "openai_responses_task_compiler_transport_with_client",
     "observation_from_tool_result",
-    "promote_observation_to_belief_patch",
-    "promote_observation_to_patch",
+    "promote_belief_candidate_to_delta",
+    "promote_observation_to_delta",
+    "promote_observation_to_belief_delta",
     "reflect_and_redirect",
     "RedirectProposal",
     "record_failure",
-    "State",
-    "StatePatch",
-    "apply_patch",
-    "reduce_event",
-    "replay",
-    "replay_event_payload_artifact",
-    "replay_run_artifact_json",
-    "replay_serialized_transition_events",
-    "replay_transition_events",
     "require_schema_version",
     "run_result_to_artifact",
     "run_allowed_tool_call_observation_flow",
@@ -487,6 +530,9 @@ __all__ = [
     "StateStore",
     "PersistenceSnapshot",
     "EventStoreEntry",
+    "load_world_state_from_file",
+    "save_world_state",
+    "load_world_state",
     "ExecutionMetricsCollector",
     "ExecutionObserver",
     "ExecutionPhase",
@@ -504,4 +550,48 @@ __all__ = [
     "ImportExportManager",
     "ExportPackage",
     "ExportManifest",
+    "Confidence",
+    "RevisionDelta",
+    "RevisionTargetKind",
+    "WorldEntity",
+    "WorldHypothesis",
+    "WorldRelation",
+    "WORLD_SCHEMA_VERSION",
+    "WorldState",
+    "add_anchor_facts",
+    "add_entity",
+    "add_hypothesis_to_world",
+    "add_relation",
+    "add_tension",
+    "remove_entity",
+    "resolve_tension",
+    "update_entity",
+    "update_hypothesis_status",
+    "update_self_model",
+    "WORLD_STATE_SCHEMA_VERSION",
+    "CommitmentEvent",
+    "FullCommitmentKind",
+    "Reversibility",
+    "complete_commitment",
+    "make_act_commitment",
+    "make_observation_commitment",
+    "make_tool_contact_commitment",
+    "COMMITMENT_SCHEMA_VERSION",
+    "CommitmentPolicy",
+    "CommitmentPolicyDecision",
+    "DefaultCommitmentPolicy",
+    "evaluate_commitment_policy",
+    "ModelRevisionEvent",
+    "RevisionKind",
+    "revise_from_commitment",
+    "REVISION_SCHEMA_VERSION",
+    "DefaultRevisionPolicy",
+    "RevisionPolicy",
+    "RevisionPolicyDecision",
+    "evaluate_revision_policy",
+    "REVISION_POLICY_SCHEMA_VERSION",
+    "HypothesisCandidate",
+    "generate_from_tension",
+    "generate_from_conflict",
+    "rank_hypotheses",
 ]

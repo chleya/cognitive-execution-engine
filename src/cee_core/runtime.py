@@ -7,18 +7,28 @@ from typing import Optional, List
 
 from .approval import ApprovalGate, ApprovalGateResult
 from .audit_policy import CompilerAuditPolicy
+from .commitment import CommitmentEvent
+from .commitment_policy import CommitmentPolicyDecision
 from .deliberation import ReasoningChain, ReasoningStep, deliberate_chain, deliberate_next_action
 from .domain_context import DomainContext
-from .domain_policy import evaluate_patch_policy_in_domain
 from .event_log import EventLog
-from .events import DeliberationEvent, Event, StateTransitionEvent
+from .events import DeliberationEvent, Event
+from .planner import (
+    DeltaPolicyDecision,
+    PlanExecutionResult,
+    PlanSpec,
+    evaluate_delta_policy_in_domain,
+    plan_from_task,
+    _build_commitment_from_delta,
+    _build_revision_from_delta,
+)
+from .revision import ModelRevisionEvent
+from .world_state import WorldState
 from .llm_task_adapter import (
     LLMTaskCompiler,
     ProviderBackedTaskCompiler,
     compile_task_with_llm_adapter,
 )
-from .planner import PlanExecutionResult, PlanSpec, plan_from_task
-from .state import State
 from .tasks import TaskSpec, compile_task
 from .tool_observation_flow import execute_plan_with_read_only_tools
 from .tool_runner import InMemoryReadOnlyToolRunner
@@ -43,44 +53,91 @@ class RunResult:
     plan: PlanSpec
     plan_result: PlanExecutionResult
     event_log: EventLog
-    replayed_state: State
     approval_gate_result: ApprovalGateResult | None = None
     reasoning_chain: ReasoningChain | None = None
+    commitment_events: tuple[CommitmentEvent, ...] = ()
+    revision_events: tuple[ModelRevisionEvent, ...] = ()
+    world_state: WorldState | None = None
 
     @property
-    def allowed_transitions(self) -> tuple[StateTransitionEvent, ...]:
-        return self.plan_result.allowed
+    def allowed_count(self) -> int:
+        return self.plan_result.allowed_count
 
     @property
-    def blocked_transitions(self) -> tuple[StateTransitionEvent, ...]:
-        return self.plan_result.blocked
+    def blocked_count(self) -> int:
+        return self.plan_result.blocked_count
 
     @property
-    def approval_required_transitions(self) -> tuple[StateTransitionEvent, ...]:
-        return self.plan_result.requires_approval
+    def requires_approval_count(self) -> int:
+        return self.plan_result.requires_approval_count
 
     @property
-    def denied_transitions(self) -> tuple[StateTransitionEvent, ...]:
-        return self.plan_result.denied
+    def allowed_transitions(self) -> tuple[CommitmentEvent, ...]:
+        return tuple(ce for ce, d in zip(self.commitment_events, self.plan_result.policy_decisions) if d.allowed and not d.requires_approval)
 
     @property
-    def approved_transitions(self) -> tuple[StateTransitionEvent, ...]:
-        if self.approval_gate_result is None:
-            return ()
-        return self.approval_gate_result.approved_transitions
+    def blocked_transitions(self) -> tuple[CommitmentEvent, ...]:
+        return tuple(ce for ce, d in zip(self.commitment_events, self.plan_result.policy_decisions) if not d.allowed and not d.requires_approval)
 
     @property
-    def rejected_transitions(self) -> tuple[StateTransitionEvent, ...]:
-        if self.approval_gate_result is None:
-            return ()
-        return self.approval_gate_result.rejected_transitions
+    def approval_required_transitions(self) -> tuple[CommitmentEvent, ...]:
+        return tuple(ce for ce, d in zip(self.commitment_events, self.plan_result.policy_decisions) if d.requires_approval)
+
+    @property
+    def denied_transitions(self) -> tuple[CommitmentEvent, ...]:
+        return tuple(ce for ce, d in zip(self.commitment_events, self.plan_result.policy_decisions) if not d.allowed and not d.requires_approval)
 
     @property
     def redirect_proposed(self) -> bool:
         return (
             self.reasoning_step.chosen_action == "propose_redirect"
-            and len(self.plan.candidate_patches) == 0
+            and len(self.plan.candidate_deltas) == 0
         )
+
+
+def _extract_beliefs_and_memory_from_world(
+    ws: WorldState,
+) -> tuple[dict, dict]:
+    """Extract beliefs and memory dicts from WorldState."""
+    import json
+
+    beliefs: dict = {}
+    memory: dict = {}
+
+    for e in ws.entities:
+        if e.kind == "belief_item":
+            key = e.entity_id.replace("belief-", "")
+            parts = e.summary.split(" = ", 1)
+            if len(parts) == 2:
+                try:
+                    beliefs[key] = int(parts[1])
+                except ValueError:
+                    try:
+                        beliefs[key] = float(parts[1])
+                    except ValueError:
+                        beliefs[key] = parts[1]
+            else:
+                beliefs[key] = e.summary
+        elif e.kind == "belief_group":
+            key = e.entity_id.replace("belief-", "")
+            try:
+                beliefs[key] = json.loads(e.summary)
+            except (json.JSONDecodeError, ValueError):
+                beliefs[key] = {}
+        elif e.kind == "memory_entry":
+            key = e.entity_id.replace("memory-", "")
+            try:
+                memory[key] = json.loads(e.summary)
+            except (json.JSONDecodeError, ValueError):
+                memory[key] = []
+
+    beliefs["hypotheses"] = [h.to_dict() for h in ws.hypotheses]
+    beliefs["anchored_facts"] = [
+        {"fact_id": f"fact-{i}", "statement": s}
+        for i, s in enumerate(ws.anchored_fact_summaries)
+    ]
+
+    return beliefs, memory
 
 
 def _apply_approval_gate(
@@ -91,17 +148,17 @@ def _apply_approval_gate(
     if approval_gate is None:
         return None
 
-    requires_approval = plan_result.requires_approval
-    if not requires_approval:
+    requires_approval_events = tuple(
+        ce for ce, d in zip(plan_result.commitment_events, plan_result.policy_decisions)
+        if d.requires_approval
+    )
+    if not requires_approval_events:
         return None
 
-    gate_result = approval_gate.resolve(requires_approval)
+    gate_result = approval_gate.resolve(requires_approval_events)
 
     for decision in gate_result.decisions:
         event_log.append(decision.to_event())
-
-    for event in gate_result.approved_transitions:
-        event_log.append(event)
 
     return gate_result
 
@@ -111,39 +168,62 @@ def _execute_plan_in_domain(
     domain_context: DomainContext,
     *,
     event_log: EventLog,
-    current_state: State | None = None,
+    current_world_state: WorldState | None = None,
     tool_runner: InMemoryReadOnlyToolRunner | None = None,
     promote_tool_observations_to_belief_keys: dict[str, str] | None = None,
 ) -> PlanExecutionResult:
-    """Execute a plan with domain overlay applied to patch transitions."""
+    """Execute a plan with domain overlay applied to delta policy decisions."""
+
+    _prior_state_id = current_world_state.state_id if current_world_state else "ws_0"
 
     if plan.proposed_tool_calls:
         if tool_runner is None:
             raise ValueError("tool_runner is required when plan has proposed_tool_calls")
-        return execute_plan_with_read_only_tools(
+        tool_result = execute_plan_with_read_only_tools(
             plan,
             tool_runner,
             event_log=event_log,
             promote_to_belief_keys=promote_tool_observations_to_belief_keys,
             domain_context=domain_context,
-        ).plan_result
-
-    events: list[StateTransitionEvent] = []
-
-    for patch in plan.candidate_patches:
-        decision = evaluate_patch_policy_in_domain(
-            patch, domain_context, current_state=current_state,
         )
-        event = StateTransitionEvent(
-            patch=patch,
-            policy_decision=decision,
-            actor=plan.actor,
-            reason=f"plan:{plan.plan_id}:{plan.objective}",
-        )
-        event_log.append(event)
-        events.append(event)
+        return tool_result.plan_result
 
-    return PlanExecutionResult(plan=plan, events=tuple(events), tool_call_events=())
+    commitment_events: list[CommitmentEvent] = []
+    revision_events: list[ModelRevisionEvent] = []
+    policy_decisions: list[DeltaPolicyDecision] = []
+
+    prior_state_id = _prior_state_id
+
+    current_beliefs: dict[str, object] | None = None
+    current_memory: dict[str, object] | None = None
+    if current_world_state is not None:
+        current_beliefs, current_memory = _extract_beliefs_and_memory_from_world(current_world_state)
+
+    for i, delta in enumerate(plan.candidate_deltas):
+        decision = evaluate_delta_policy_in_domain(
+            delta, domain_context,
+            current_beliefs=current_beliefs,
+            current_memory=current_memory,
+        )
+        policy_decisions.append(decision)
+
+        ce = _build_commitment_from_delta(delta, decision, plan, i)
+        commitment_events.append(ce)
+        event_log.append(ce)
+
+        if decision.allowed and not decision.requires_approval:
+            resulting_state_id = f"ws_{i + 1}"
+            rev = _build_revision_from_delta(delta, prior_state_id, resulting_state_id, ce, plan)
+            revision_events.append(rev)
+            event_log.append(rev)
+            prior_state_id = resulting_state_id
+
+    return PlanExecutionResult(
+        plan=plan,
+        commitment_events=tuple(commitment_events),
+        revision_events=tuple(revision_events),
+        policy_decisions=tuple(policy_decisions),
+    )
 
 
 def execute_task(raw_input: str, *, event_log: EventLog | None = None) -> RunResult:
@@ -166,11 +246,7 @@ def execute_task_with_chain(
     approval_gate: ApprovalGate | None = None,
     max_chain_steps: int = 5,
 ) -> RunResult:
-    """Run the deterministic pipeline using multi-step reasoning chain.
-
-    Each step in the chain is recorded as a DeliberationEvent in the
-    audit trail. The final step's chosen_action drives planning.
-    """
+    """Run the deterministic pipeline using multi-step reasoning chain."""
 
     log = event_log or EventLog()
     task = compile_task(
@@ -194,12 +270,15 @@ def execute_task_with_chain(
         plan,
         domain_context,
         event_log=log,
-        current_state=log.replay_state(),
+        current_world_state=log.replay_world_state() if log.revision_events() else None,
         tool_runner=tool_runner,
         promote_tool_observations_to_belief_keys=promote_tool_observations_to_belief_keys,
     )
     gate_result = _apply_approval_gate(plan_result, log, approval_gate)
-    replayed_state = log.replay_state()
+
+    world_state = None
+    if plan_result.commitment_events or plan_result.revision_events:
+        world_state = log.replay_world_state()
 
     return RunResult(
         task=task,
@@ -208,8 +287,10 @@ def execute_task_with_chain(
         plan=plan,
         plan_result=plan_result,
         event_log=log,
-        replayed_state=replayed_state,
         approval_gate_result=gate_result,
+        commitment_events=plan_result.commitment_events,
+        revision_events=plan_result.revision_events,
+        world_state=world_state,
     )
 
 
@@ -224,21 +305,7 @@ def execute_task_in_domain(
     memory_store: MemoryStore | None = None,
     router: UncertaintyRouter | None = None,
 ) -> RunResult:
-    """Run the deterministic pipeline in an explicit domain context.
-    
-    Args:
-        raw_input: The raw task input string
-        domain_context: The domain context for policy evaluation
-        event_log: Optional event log for recording events
-        tool_runner: Optional tool runner for executing read-only tools
-        promote_tool_observations_to_belief_keys: Keys for promoting tool observations to beliefs
-        approval_gate: Optional approval gate for high-risk transitions
-        memory_store: Optional memory store for precedent retrieval
-        router: Optional uncertainty router for routing decisions
-        
-    Returns:
-        RunResult containing the full execution trace and results
-    """
+    """Run the deterministic pipeline in an explicit domain context."""
 
     log = event_log or EventLog()
     task = compile_task(
@@ -247,13 +314,12 @@ def execute_task_in_domain(
         domain_name=domain_context.domain_name,
     )
     tool_registry = tool_runner.registry if tool_runner is not None else None
-    
-    # Precedent Memory Retrieval (if memory_store provided)
+
     precedent_context: List[RetrievalResult] = []
     if memory_store is not None:
         from .memory_index import MemoryIndex
         memory_index = MemoryIndex(memory_store)
-        memory_index.build_index_from_store()  # Build index from existing memories
+        memory_index.build_index_from_store()
         retriever = Retriever(memory_index=memory_index)
         query = RetrievalQuery(
             query_text=raw_input,
@@ -274,17 +340,16 @@ def execute_task_in_domain(
                     stop_condition="retrieval_complete",
                 ),
             ))
-    
+
     reasoning_step = deliberate_next_action(task, tool_registry=tool_registry)
     log.append(DeliberationEvent(reasoning_step=reasoning_step))
-    
+
     plan = plan_from_task(
         task,
         tool_registry=tool_registry,
         reasoning_step=reasoning_step,
     )
-    
-    # Uncertainty Routing (if router provided)
+
     routing_result: Optional[RoutingResult] = None
     if router is not None:
         risk_level_value = task.risk_level.value if hasattr(task.risk_level, 'value') else task.risk_level
@@ -296,8 +361,7 @@ def execute_task_in_domain(
             model_self_confidence=0.75,
         )
         routing_result = router.route(signals)
-        
-        # Record routing decision to event log
+
         log.append(DeliberationEvent(
             reasoning_step=ReasoningStep(
                 task_id=task.task_id,
@@ -310,22 +374,23 @@ def execute_task_in_domain(
                 stop_condition="routing_complete",
             ),
         ))
-        
-        # Adjust approval strategy based on routing decision
+
         if routing_result.decision == RoutingDecision.NEEDS_HUMAN_REVIEW:
-            # Force approval for high-uncertainty tasks
             approval_gate = approval_gate or ApprovalGate()
-    
+
     plan_result = _execute_plan_in_domain(
         plan,
         domain_context,
         event_log=log,
-        current_state=log.replay_state(),
+        current_world_state=log.replay_world_state() if log.revision_events() else None,
         tool_runner=tool_runner,
         promote_tool_observations_to_belief_keys=promote_tool_observations_to_belief_keys,
     )
     gate_result = _apply_approval_gate(plan_result, log, approval_gate)
-    replayed_state = log.replay_state()
+
+    world_state = None
+    if plan_result.commitment_events or plan_result.revision_events:
+        world_state = log.replay_world_state()
 
     return RunResult(
         task=task,
@@ -333,8 +398,10 @@ def execute_task_in_domain(
         plan=plan,
         plan_result=plan_result,
         event_log=log,
-        replayed_state=replayed_state,
         approval_gate_result=gate_result,
+        commitment_events=plan_result.commitment_events,
+        revision_events=plan_result.revision_events,
+        world_state=world_state,
     )
 
 
@@ -433,12 +500,15 @@ def execute_task_with_compiler_in_domain(
         plan,
         domain_context,
         event_log=log,
-        current_state=log.replay_state(),
+        current_world_state=log.replay_world_state() if log.revision_events() else None,
         tool_runner=tool_runner,
         promote_tool_observations_to_belief_keys=promote_tool_observations_to_belief_keys,
     )
     gate_result = _apply_approval_gate(plan_result, log, approval_gate)
-    replayed_state = log.replay_state()
+
+    world_state = None
+    if plan_result.commitment_events or plan_result.revision_events:
+        world_state = log.replay_world_state()
 
     return RunResult(
         task=task,
@@ -446,6 +516,8 @@ def execute_task_with_compiler_in_domain(
         plan=plan,
         plan_result=plan_result,
         event_log=log,
-        replayed_state=replayed_state,
         approval_gate_result=gate_result,
+        commitment_events=plan_result.commitment_events,
+        revision_events=plan_result.revision_events,
+        world_state=world_state,
     )

@@ -5,8 +5,9 @@ from cee_core import (
     dumps_event_payloads,
     execute_task,
     loads_event_payloads,
-    replay_event_payload_artifact,
 )
+from cee_core.run_artifact import run_result_to_artifact
+from cee_core.world_state import WorldState
 
 
 def test_dump_and_load_event_payloads_round_trip():
@@ -20,23 +21,26 @@ def test_dump_and_load_event_payloads_round_trip():
     assert payloads[0]["event_type"] == "task.received"
 
 
-def test_replay_event_payload_artifact_reconstructs_state():
+def test_artifact_world_state_snapshot_matches_result():
     result = execute_task("analyze project risk")
-    artifact = dumps_event_payloads(result.event_log.all())
 
-    replayed = replay_event_payload_artifact(artifact)
+    artifact = run_result_to_artifact(result)
 
-    assert replayed.snapshot() == result.replayed_state.snapshot()
+    assert artifact.world_state_snapshot is not None
+    artifact_ws = WorldState.from_dict(artifact.world_state_snapshot)
+    assert result.world_state is not None
+    assert artifact_ws == result.world_state
 
 
-def test_replay_event_payload_artifact_preserves_blocked_as_audit_only():
+def test_artifact_world_state_preserves_blocked_as_audit_only():
     result = execute_task("update the project belief summary")
-    artifact = dumps_event_payloads(result.event_log.all())
 
-    replayed = replay_event_payload_artifact(artifact)
+    artifact = run_result_to_artifact(result)
 
-    assert replayed.snapshot() == result.replayed_state.snapshot()
-    assert "last_medium_or_high_risk_task" not in replayed.self_model
+    assert artifact.world_state_snapshot is not None
+    artifact_ws = WorldState.from_dict(artifact.world_state_snapshot)
+    assert result.world_state is not None
+    assert artifact_ws == result.world_state
 
 
 def test_load_event_payloads_rejects_non_array_json():
@@ -57,4 +61,3 @@ def test_dump_event_payloads_supports_plain_audit_events():
 
     assert payloads[0]["event_type"] == "audit.note"
     assert payloads[0]["payload"] == {"message": "hello"}
-

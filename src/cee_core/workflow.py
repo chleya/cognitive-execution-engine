@@ -123,6 +123,17 @@ class StepResult:
             "variables": self.variables,
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "StepResult":
+        return cls(
+            step_id=str(payload["step_id"]),
+            status=str(payload["status"]),
+            output=payload.get("output"),
+            error_message=str(payload.get("error_message", "")),
+            execution_time_ms=float(payload.get("execution_time_ms", 0.0)),
+            variables=payload.get("variables", {}),
+        )
+
 
 @dataclass(frozen=True)
 class WorkflowResult:
@@ -148,6 +159,21 @@ class WorkflowResult:
             "total_execution_time_ms": self.total_execution_time_ms,
             "error_message": self.error_message,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "WorkflowResult":
+        step_results = [
+            StepResult.from_dict(r)
+            for r in payload.get("step_results", [])
+        ]
+        return cls(
+            workflow_id=str(payload["workflow_id"]),
+            status=str(payload["status"]),
+            step_results=step_results,
+            variables=payload.get("variables", {}),
+            total_execution_time_ms=float(payload.get("total_execution_time_ms", 0.0)),
+            error_message=str(payload.get("error_message", "")),
+        )
 
 
 class StepExecutor(Protocol):

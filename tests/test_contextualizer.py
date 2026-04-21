@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Tests for contextualizer module."""
 
 import pytest

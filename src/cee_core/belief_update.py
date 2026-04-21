@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .observations import ObservationCandidate
-from .state import StatePatch
+from .world_schema import RevisionDelta
 
 
 def build_belief_payload(
@@ -66,27 +66,32 @@ def build_belief_payload(
     }
 
 
-def promote_observation_to_belief_patch(
+def promote_observation_to_belief_delta(
     observation: ObservationCandidate,
     *,
     belief_key: str,
     prior_belief: dict[str, Any] | None = None,
     evidence_weight: float | None = None,
-) -> StatePatch:
-    """Create a belief patch using bounded confidence update semantics."""
+) -> RevisionDelta:
+    """Create a belief delta using bounded confidence update semantics."""
 
     if not belief_key.strip():
         raise ValueError("belief_key cannot be empty")
 
-    return StatePatch(
-        section="beliefs",
-        key=belief_key,
-        op="set",
-        value=build_belief_payload(
-            observation,
-            prior_belief=prior_belief,
-            evidence_weight=evidence_weight,
-        ),
+    payload = build_belief_payload(
+        observation,
+        prior_belief=prior_belief,
+        evidence_weight=evidence_weight,
+    )
+
+    return RevisionDelta(
+        delta_id=f"delta-belief-{belief_key}",
+        target_kind="entity_update",
+        target_ref=f"beliefs.{belief_key}",
+        before_summary="belief not set",
+        after_summary=str(payload.get("content", ""))[:200],
+        justification=f"promote observation from {observation.source_tool}",
+        raw_value=payload,
     )
 
 

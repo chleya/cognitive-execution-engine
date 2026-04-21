@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
-from .event_log import EventRecord, replay_serialized_transition_events
-from .state import State
+from .event_log import EventRecord
 
 
 def events_to_payloads(events: Iterable[EventRecord]) -> list[dict[str, object]]:
@@ -41,16 +40,3 @@ def loads_event_payloads(artifact: str) -> list[dict[str, object]]:
             raise ValueError("Event artifact entries must be JSON objects")
 
     return payloads
-
-
-def replay_event_payload_artifact(
-    artifact: str,
-    initial_state: State | None = None,
-) -> State:
-    """Replay allowed transitions from a JSON event payload artifact."""
-
-    return replay_serialized_transition_events(
-        loads_event_payloads(artifact),
-        initial_state=initial_state,
-    )
-

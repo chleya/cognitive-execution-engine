@@ -7,11 +7,9 @@ from cee_core import (
     DomainRulePack,
     EvaluatorPlugin,
     GlossaryPack,
-    PolicyDecision,
-    State,
-    StatePatch,
-    apply_patch,
-    evaluate_patch_policy,
+    RevisionDelta,
+    WorldState,
+    evaluate_delta_policy,
 )
 
 
@@ -55,33 +53,51 @@ def test_domain_plugin_registry_rejects_duplicate_domain_names():
         registry.register(pack)
 
 
-def test_domain_data_patch_is_allowed_by_policy():
-    patch = StatePatch(
-        section="domain_data",
-        key="active_entities",
-        op="set",
-        value=["bridge-1"],
+def test_domain_data_delta_is_allowed_by_policy():
+    delta = RevisionDelta(
+        delta_id="d1",
+        target_kind="entity_update",
+        target_ref="domain_data.active_entities",
+        before_summary="not set",
+        after_summary='["bridge-1"]',
+        justification="test domain data update",
+        raw_value=["bridge-1"],
     )
 
-    decision = evaluate_patch_policy(patch)
+    decision = evaluate_delta_policy(delta)
 
-    assert decision == PolicyDecision(
-        verdict="allow",
-        reason="domain_data patch allowed by Stage 0 policy",
-        policy_ref="stage0.patch-policy:v1",
+    assert decision.allowed
+    assert not decision.requires_approval
+
+
+def test_domain_data_delta_updates_world_state_via_replay():
+    from cee_core import EventLog, ModelRevisionEvent
+
+    ws = WorldState(state_id="ws_0")
+    delta = RevisionDelta(
+        delta_id="d1",
+        target_kind="entity_update",
+        target_ref="domain_data.risk_cases",
+        before_summary="not set",
+        after_summary='{"rc-1": "open"}',
+        justification="test domain data update",
+        raw_value={"rc-1": "open"},
     )
 
-
-def test_domain_data_patch_updates_state_snapshot():
-    state = State()
-    patch = StatePatch(
-        section="domain_data",
-        key="risk_cases",
-        op="set",
-        value={"rc-1": "open"},
+    rev = ModelRevisionEvent(
+        revision_id="rev_1",
+        prior_state_id="ws_0",
+        caused_by_event_id="evt_1",
+        revision_kind="expansion",
+        deltas=(delta,),
+        resulting_state_id="ws_1",
     )
 
-    next_state = apply_patch(state, patch)
+    log = EventLog()
+    log.append(rev)
 
-    assert next_state.domain_data["risk_cases"] == {"rc-1": "open"}
-    assert next_state.meta["version"] == 1
+    next_ws = log.replay_world_state(initial=ws)
+
+    entity = next_ws.find_entity("domain-risk_cases")
+    assert entity is not None
+    assert entity.kind == "domain_data"

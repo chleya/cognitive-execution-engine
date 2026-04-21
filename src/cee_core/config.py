@@ -48,6 +48,7 @@ class PolicyConfig:
         "memory", "goals", "beliefs", "self_model",
         "policy", "domain_data", "tool_affordances", "meta"
     ])
+    event_format: str = "new"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class CEEConfig:
                     "memory", "goals", "beliefs", "self_model",
                     "policy", "domain_data", "tool_affordances", "meta"
                 ]),
+                event_format=policy_data.get("event_format", "dual"),
             ),
             persistence=PersistenceConfig(
                 storage_dir=persistence_data.get("storage_dir", "cee_storage"),
@@ -203,6 +205,7 @@ class CEEConfig:
                 "require_approval_write": self.policy.require_approval_write,
                 "max_patch_size": self.policy.max_patch_size,
                 "allowed_sections": self.policy.allowed_sections,
+                "event_format": self.policy.event_format,
             },
             "persistence": {
                 "storage_dir": self.persistence.storage_dir,

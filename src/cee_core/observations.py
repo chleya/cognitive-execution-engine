@@ -6,7 +6,7 @@ promoted through policy.
 BeliefCandidate is the LLM insertion point output for belief extraction.
 It is not a canonical belief until promoted through policy.
 
-ReflectionCandidate is the LLM insertion point output for reflection.
+ReflectionCandidate is the LLM reflection summarization insertion point output.
 It is not a procedural rule until separately validated.
 """
 
@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .state import StatePatch
 from .tools import ToolResultEvent
+from .world_schema import RevisionDelta
 
 
 @dataclass(frozen=True)
@@ -49,9 +49,9 @@ class BeliefCandidate:
     It is not a canonical belief. It must be promoted through policy
     and replay before affecting state.
 
-    Key invariant: BeliefCandidate may not directly become StatePatch.
-    It must go through promote_belief_candidate_to_patch, which creates
-    a StatePatch that still requires policy evaluation.
+    Key invariant: BeliefCandidate may not directly become RevisionDelta.
+    It must go through promote_belief_candidate_to_delta, which creates
+    a RevisionDelta that still requires policy evaluation.
     """
 
     content: Any
@@ -79,7 +79,7 @@ class ReflectionCandidate:
     This is the output of the reflection summarizer LLM insertion point.
     It is a structured summary of recent behavior, not a procedural rule.
 
-    Key invariant: ReflectionCandidate may not directly become StatePatch,
+    Key invariant: ReflectionCandidate may not directly become RevisionDelta,
     policy rule, or tool execution. It is an observation about past behavior
     that may inform future calibration.
     """
@@ -150,46 +150,48 @@ def build_observation_event(
     return ObservationEvent(observation=observation, actor=actor)
 
 
-def promote_observation_to_patch(
+def promote_observation_to_delta(
     observation: ObservationCandidate,
     *,
     belief_key: str,
-) -> StatePatch:
-    """Create a belief patch from an observation candidate.
+) -> RevisionDelta:
+    """Create a belief delta from an observation candidate.
 
-    This does not mutate state. The returned patch must still pass policy and
+    This does not mutate state. The returned delta must still pass policy and
     replay before it affects canonical state.
     """
 
-    from .belief_update import promote_observation_to_belief_patch
+    from .belief_update import promote_observation_to_belief_delta
 
-    return promote_observation_to_belief_patch(
+    return promote_observation_to_belief_delta(
         observation,
         belief_key=belief_key,
     )
 
 
-def promote_belief_candidate_to_patch(
+def promote_belief_candidate_to_delta(
     candidate: BeliefCandidate,
     *,
     belief_key: str,
-) -> StatePatch:
-    """Create a belief patch from a belief candidate.
+) -> RevisionDelta:
+    """Create a belief delta from a belief candidate.
 
-    This does not mutate state. The returned patch must still pass policy
-    (beliefs section is allowed by base policy, but confidence gate may
-    escalate to requires_approval) and replay before it affects canonical state.
+    This does not mutate state. The returned delta must still pass policy
+    and replay before it affects canonical state.
 
-    Key invariant: BeliefCandidate may not directly become StatePatch
+    Key invariant: BeliefCandidate may not directly become RevisionDelta
     without this function. This ensures all belief promotions are
     explicit and auditable.
     """
 
-    return StatePatch(
-        section="beliefs",
-        key=belief_key,
-        op="set",
-        value={
+    return RevisionDelta(
+        delta_id=f"delta-belief-{belief_key}",
+        target_kind="entity_update",
+        target_ref=f"beliefs.{belief_key}",
+        before_summary="belief not set",
+        after_summary=str(candidate.content)[:200],
+        justification=f"promote belief candidate from {candidate.extraction_source}",
+        raw_value={
             "content": candidate.content,
             "confidence": candidate.confidence,
             "evidence_weight": candidate.evidence_weight,

@@ -1,14 +1,15 @@
 from cee_core import (
+    CommitmentEvent,
     DeliberationEvent,
     Event,
     EventLog,
-    PolicyDecision,
+    ModelRevisionEvent,
     ReasoningStep,
-    StatePatch,
-    StateTransitionEvent,
+    RevisionDelta,
     ToolCallSpec,
     ToolPolicyDecision,
     ToolResultEvent,
+    WorldState,
     build_observation_event,
     observation_from_tool_result,
     render_event_narration,
@@ -24,6 +25,34 @@ def test_render_event_narration_covers_small_step_flow():
         result={"query": "runtime", "hits": 2},
     )
     observation = observation_from_tool_result(tool_result)
+
+    ws = WorldState(state_id="ws_0")
+    commitment = CommitmentEvent(
+        event_id="evt_obs_1",
+        source_state_id="ws_0",
+        commitment_kind="observe",
+        intent_summary="Read docs about runtime policy",
+    )
+
+    delta = RevisionDelta(
+        delta_id="d1",
+        target_kind="entity_update",
+        target_ref="beliefs.tool.read_docs.result",
+        before_summary="not set",
+        after_summary='{"hits": 2}',
+        justification="observation from read_docs",
+        raw_value={"hits": 2},
+    )
+    revision = ModelRevisionEvent(
+        revision_id="rev_1",
+        prior_state_id="ws_0",
+        caused_by_event_id="evt_obs_1",
+        revision_kind="expansion",
+        deltas=(delta,),
+        resulting_state_id="ws_1",
+        revision_summary="Updated beliefs from tool result",
+    )
+
     events = (
         Event(event_type="task.received", payload={"objective": "read docs about runtime policy"}),
         DeliberationEvent(
@@ -48,14 +77,8 @@ def test_render_event_narration_covers_small_step_flow():
         ),
         tool_result,
         build_observation_event(observation),
-        StateTransitionEvent(
-            patch=StatePatch(section="beliefs", key="tool.read_docs.result", op="set", value={"hits": 2}),
-            policy_decision=PolicyDecision(
-                verdict="allow",
-                reason="beliefs patch allowed",
-                policy_ref="stage0.patch-policy:v1",
-            ),
-        ),
+        commitment,
+        revision,
     )
 
     lines = render_event_narration(events)
@@ -66,7 +89,8 @@ def test_render_event_narration_covers_small_step_flow():
         "Proposed tool call: read_docs (allow)",
         "Completed tool call: read_docs",
         "Recorded observation from tool: read_docs",
-        "Evaluated state patch: beliefs.tool.read_docs.result (allow)",
+        "Committed observe: Read docs about runtime policy",
+        "Revised model (expansion): Updated beliefs from tool result",
     )
 
 
