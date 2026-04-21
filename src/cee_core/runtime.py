@@ -30,6 +30,7 @@ from .llm_task_adapter import (
     compile_task_with_llm_adapter,
 )
 from .tasks import TaskSpec, compile_task
+from .tool_gateway import ToolGateway, build_tool_gateway
 from .tool_observation_flow import execute_plan_with_read_only_tools
 from .tool_runner import InMemoryReadOnlyToolRunner
 from .uncertainty_router import (
@@ -170,6 +171,7 @@ def _execute_plan_in_domain(
     event_log: EventLog,
     current_world_state: WorldState | None = None,
     tool_runner: InMemoryReadOnlyToolRunner | None = None,
+    tool_gateway: ToolGateway | None = None,
     promote_tool_observations_to_belief_keys: dict[str, str] | None = None,
 ) -> PlanExecutionResult:
     """Execute a plan with domain overlay applied to delta policy decisions."""
@@ -177,16 +179,42 @@ def _execute_plan_in_domain(
     _prior_state_id = current_world_state.state_id if current_world_state else "ws_0"
 
     if plan.proposed_tool_calls:
-        if tool_runner is None:
-            raise ValueError("tool_runner is required when plan has proposed_tool_calls")
-        tool_result = execute_plan_with_read_only_tools(
-            plan,
-            tool_runner,
-            event_log=event_log,
-            promote_to_belief_keys=promote_tool_observations_to_belief_keys,
-            domain_context=domain_context,
-        )
-        return tool_result.plan_result
+        if tool_gateway is not None:
+            gateway_results = tool_gateway.execute_batch(
+                plan.proposed_tool_calls,
+                event_log=event_log,
+                promote_to_belief_keys=promote_tool_observations_to_belief_keys,
+                current_state_id=_prior_state_id,
+            )
+            allowed = tuple(r for r in gateway_results if r.succeeded)
+            denied = tuple(r for r in gateway_results if r.blocked_by_policy or r.blocked_by_approval)
+            commitment_events = tuple(
+                r.commitment_event for r in gateway_results
+                if r.commitment_event is not None
+            )
+            revision_events = tuple(
+                r.revision_event for r in gateway_results
+                if r.revision_event is not None
+            )
+            return PlanExecutionResult(
+                plan=plan,
+                allowed_transitions=allowed,
+                denied_transitions=denied,
+                commitment_events=commitment_events,
+                revision_events=revision_events,
+                redirect_proposed=False,
+            )
+        elif tool_runner is not None:
+            tool_result = execute_plan_with_read_only_tools(
+                plan,
+                tool_runner,
+                event_log=event_log,
+                promote_to_belief_keys=promote_tool_observations_to_belief_keys,
+                domain_context=domain_context,
+            )
+            return tool_result.plan_result
+        else:
+            raise ValueError("tool_runner or tool_gateway is required when plan has proposed_tool_calls")
 
     commitment_events: list[CommitmentEvent] = []
     revision_events: list[ModelRevisionEvent] = []
@@ -242,6 +270,7 @@ def execute_task_with_chain(
     *,
     event_log: EventLog | None = None,
     tool_runner: InMemoryReadOnlyToolRunner | None = None,
+    tool_gateway: ToolGateway | None = None,
     promote_tool_observations_to_belief_keys: dict[str, str] | None = None,
     approval_gate: ApprovalGate | None = None,
     max_chain_steps: int = 5,
@@ -272,6 +301,7 @@ def execute_task_with_chain(
         event_log=log,
         current_world_state=log.replay_world_state() if log.revision_events() else None,
         tool_runner=tool_runner,
+        tool_gateway=tool_gateway,
         promote_tool_observations_to_belief_keys=promote_tool_observations_to_belief_keys,
     )
     gate_result = _apply_approval_gate(plan_result, log, approval_gate)
@@ -300,6 +330,7 @@ def execute_task_in_domain(
     *,
     event_log: EventLog | None = None,
     tool_runner: InMemoryReadOnlyToolRunner | None = None,
+    tool_gateway: ToolGateway | None = None,
     promote_tool_observations_to_belief_keys: dict[str, str] | None = None,
     approval_gate: ApprovalGate | None = None,
     memory_store: MemoryStore | None = None,
@@ -384,6 +415,7 @@ def execute_task_in_domain(
         event_log=log,
         current_world_state=log.replay_world_state() if log.revision_events() else None,
         tool_runner=tool_runner,
+        tool_gateway=tool_gateway,
         promote_tool_observations_to_belief_keys=promote_tool_observations_to_belief_keys,
     )
     gate_result = _apply_approval_gate(plan_result, log, approval_gate)

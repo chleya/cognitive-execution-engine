@@ -230,7 +230,7 @@ def test_execute_plan_in_domain_rejects_tool_calls_without_runner():
         ),
     )
 
-    with pytest.raises(ValueError, match="tool_runner is required"):
+    with pytest.raises(ValueError, match="tool_runner or tool_gateway is required"):
         _execute_plan_in_domain(
             plan,
             build_domain_context("core"),
