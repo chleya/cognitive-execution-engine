@@ -7,6 +7,15 @@ name = "cognitive-execution-engine"
 version = "0.1.0"
 description = "State-first, policy-guarded cognitive execution engine."
 requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+api = ["fastapi>=0.100", "uvicorn>=0.23", "pydantic>=2.0"]
+llm = ["openai>=1.0"]
+vector = ["numpy>=1.24"]
+yaml = ["pyyaml>=6.0"]
+all = ["cognitive-execution-engine[api,llm,vector,yaml]"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [project.scripts]
 cee = "cee_core.cli:main"

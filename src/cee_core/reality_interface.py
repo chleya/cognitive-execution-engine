@@ -13,15 +13,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Protocol, Tuple
+from typing import Any, Callable, Protocol, Tuple, TYPE_CHECKING
 
 from .commitment import (
     CommitmentEvent,
     CommitmentKind,
     complete_commitment,
 )
+from .event_log import EventLog
+from .events import Event
 from .schemas import require_schema_version
-from .tools import ToolRegistry
+from .tools import ToolCallSpec, ToolRegistry
+
+if TYPE_CHECKING:
+    from .tool_gateway import ToolGateway
 
 logger = logging.getLogger(__name__)
 
@@ -302,3 +307,124 @@ def execute_commitment(
     method_name = _KIND_DISPATCH[commitment.commitment_kind]
     method = getattr(interface, method_name)
     return method(commitment, reality_fn)
+
+
+@dataclass(frozen=True)
+class GatewayContactResult:
+    """Result of executing a tool_contact commitment through the ToolGateway.
+
+    This bridges the reality interface (commitment-level) with the tool
+    gateway (policy + approval + audit level). The gateway provides the
+    full safety pipeline, while the reality interface provides the
+    commitment semantics.
+    """
+
+    commitment_event: CommitmentEvent
+    gateway_succeeded: bool
+    policy_verdict: str
+    tool_result_summary: str = ""
+    observation_summary: str = ""
+    approval_verdict: str = ""
+
+    @property
+    def success(self) -> bool:
+        return self.gateway_succeeded
+
+
+def execute_commitment_via_gateway(
+    commitment: CommitmentEvent,
+    gateway: ToolGateway,
+    event_log: EventLog,
+    *,
+    tool_arguments: dict[str, Any] | None = None,
+    promote_to_belief_key: str | None = None,
+    current_state_id: str = "ws_0",
+) -> GatewayContactResult:
+    """Execute a tool_contact commitment through the ToolGateway pipeline.
+
+    This is the primary integration point between the reality interface
+    (commitment-level semantics) and the tool gateway (policy + approval
+    + audit pipeline).
+
+    Key invariant: the gateway enforces policy, approval, and audit.
+    The reality interface only provides commitment semantics. Neither
+    owns execution authority independently.
+
+    Pipeline:
+    1. Validate commitment_kind is tool_contact
+    2. Extract tool_name from commitment action_summary
+    3. Build ToolCallSpec from commitment
+    4. Execute through gateway (policy → approval → execution → audit)
+    5. Record result in event log
+    6. Return GatewayContactResult
+
+    Raises ValueError if commitment_kind is not tool_contact.
+    """
+    if commitment.commitment_kind != "tool_contact":
+        raise ValueError(
+            f"execute_commitment_via_gateway requires commitment_kind='tool_contact'; "
+            f"got {commitment.commitment_kind!r}"
+        )
+
+    tool_name = commitment.action_summary
+    if not tool_name:
+        return GatewayContactResult(
+            commitment_event=complete_commitment(
+                commitment,
+                success=False,
+                external_result_summary="no tool name in commitment action_summary",
+            ),
+            gateway_succeeded=False,
+            policy_verdict="deny",
+        )
+
+    call = ToolCallSpec(
+        tool_name=tool_name,
+        arguments=tool_arguments or {},
+    )
+
+    gateway_result = gateway.execute(
+        call,
+        event_log=event_log,
+        promote_to_belief_key=promote_to_belief_key,
+        current_state_id=current_state_id,
+    )
+
+    event_log.append(Event(
+        event_type="reality.gateway_contact.completed",
+        payload={
+            "commitment_event_id": commitment.event_id,
+            "tool_name": tool_name,
+            "gateway_succeeded": gateway_result.succeeded,
+            "policy_verdict": gateway_result.policy_decision.verdict,
+        },
+        actor="reality_interface",
+    ))
+
+    observation_summary = ""
+    if gateway_result.observation is not None:
+        observation_summary = str(gateway_result.observation.content)[:200]
+
+    approval_verdict = ""
+    if gateway_result.approval_decision is not None:
+        approval_verdict = gateway_result.approval_decision.verdict
+
+    tool_result_summary = ""
+    if gateway_result.tool_result is not None:
+        tool_result_summary = str(gateway_result.tool_result.result)[:200]
+
+    completed = complete_commitment(
+        commitment,
+        success=gateway_result.succeeded,
+        external_result_summary=tool_result_summary or observation_summary,
+        observation_summaries=(observation_summary,) if observation_summary else (),
+    )
+
+    return GatewayContactResult(
+        commitment_event=completed,
+        gateway_succeeded=gateway_result.succeeded,
+        policy_verdict=gateway_result.policy_decision.verdict,
+        tool_result_summary=tool_result_summary,
+        observation_summary=observation_summary,
+        approval_verdict=approval_verdict,
+    )
