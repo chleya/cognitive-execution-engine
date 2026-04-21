@@ -6,7 +6,11 @@ from .approval import (
     ApprovalGate,
     ApprovalGateResult,
     ApprovalProvider,
+    ApprovalRequest,
+    ApprovalSource,
+    ApprovalVerdict,
     CallbackApprovalProvider,
+    InteractiveApprovalProvider,
     StaticApprovalProvider,
 )
 from .anthropic_compatible_provider import (
@@ -164,7 +168,7 @@ from .self_observation import (
 )
 from .tasks import TaskLevel, TaskSpec, classify_task_level, compile_task
 from .tool_runner import InMemoryReadOnlyToolRunner, ReadToolHandler
-from .tool_gateway import ToolGateway, ToolGatewayResult, ToolHandler as GatewayToolHandler, ApprovalProvider, StaticApprovalProvider as GatewayStaticApprovalProvider, build_tool_gateway
+from .tool_gateway import ToolGateway, ToolGatewayResult, ToolHandler as GatewayToolHandler, build_tool_gateway
 from .tool_observation_flow import (
     ToolObservationFlowResult,
     PlannerToolExecutionResult,
@@ -337,7 +341,11 @@ __all__ = [
     "ApprovalGate",
     "ApprovalGateResult",
     "ApprovalProvider",
+    "ApprovalRequest",
+    "ApprovalSource",
+    "ApprovalVerdict",
     "CallbackApprovalProvider",
+    "InteractiveApprovalProvider",
     "StaticApprovalProvider",
     "ANTHROPIC_COMPAT_BASE_URL_ENV",
     "ANTHROPIC_COMPAT_DEFAULT_MODEL",
@@ -424,8 +432,6 @@ __all__ = [
     "InMemoryReadOnlyToolRunner",
     "ToolGateway",
     "ToolGatewayResult",
-    "ApprovalProvider",
-    "GatewayStaticApprovalProvider",
     "build_tool_gateway",
     "ReadToolHandler",
     "ToolCallSpec",

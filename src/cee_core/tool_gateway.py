@@ -19,8 +19,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
+from .approval import (
+    ApprovalDecision,
+    ApprovalProvider,
+    ApprovalRequest,
+    InteractiveApprovalProvider,
+    StaticApprovalProvider,
+)
 from .commitment import CommitmentEvent, complete_commitment
 from .event_log import EventLog
 from .observations import (
@@ -59,6 +66,7 @@ class ToolGatewayResult:
     observation: ObservationCandidate | None
     promotion_delta: RevisionDelta | None
     revision_event: ModelRevisionEvent | None
+    approval_decision: ApprovalDecision | None = None
     approved: bool = True
 
     @property
@@ -75,32 +83,6 @@ class ToolGatewayResult:
     @property
     def blocked_by_approval(self) -> bool:
         return not self.approved and self.policy_decision.verdict == "requires_approval"
-
-
-class ApprovalProvider(Protocol):
-    """Protocol for approval decisions on tool calls."""
-
-    def check_approval(
-        self,
-        call: ToolCallSpec,
-        policy_decision: ToolPolicyDecision,
-    ) -> bool:
-        """Return True if the tool call is approved, False otherwise."""
-        ...
-
-
-@dataclass
-class StaticApprovalProvider:
-    """Always approves or always denies."""
-
-    verdict: bool = True
-
-    def check_approval(
-        self,
-        call: ToolCallSpec,
-        policy_decision: ToolPolicyDecision,
-    ) -> bool:
-        return self.verdict
 
 
 @dataclass
@@ -151,11 +133,12 @@ class ToolGateway:
         if policy_decision.verdict == "deny":
             return self._record_denied(call, policy_decision, event_log)
 
+        approval_decision = None
         if policy_decision.verdict == "requires_approval":
-            approved = self._check_approval(call, policy_decision)
-            if not approved:
+            approval_decision = self._check_approval(call, policy_decision)
+            if not approval_decision.approved:
                 return self._record_approval_denied(
-                    call, policy_decision, event_log
+                    call, policy_decision, approval_decision, event_log
                 )
 
         commitment = CommitmentEvent(
@@ -166,6 +149,9 @@ class ToolGateway:
             action_summary=call.tool_name,
         )
         event_log.append(commitment)
+
+        if approval_decision is not None:
+            event_log.append(approval_decision.to_event())
 
         tool_result = self._execute_handler(call)
         event_log.append(tool_result)
@@ -223,6 +209,7 @@ class ToolGateway:
             observation=observation,
             promotion_delta=promotion_delta,
             revision_event=revision_event,
+            approval_decision=approval_decision,
         )
 
     def execute_batch(
@@ -255,10 +242,21 @@ class ToolGateway:
         self,
         call: ToolCallSpec,
         policy_decision: ToolPolicyDecision,
-    ) -> bool:
-        if self.approval_provider is None:
-            return False
-        return self.approval_provider.check_approval(call, policy_decision)
+    ) -> ApprovalDecision:
+        request = ApprovalRequest.from_tool_call(
+            call, policy_decision, reason=policy_decision.reason,
+        )
+
+        if self.approval_provider is not None:
+            return self.approval_provider.decide_request(request)
+
+        return ApprovalDecision(
+            transition_trace_id=request.request_id,
+            verdict="rejected",
+            decided_by="tool_gateway",
+            reason="no approval provider configured",
+            request=request,
+        )
 
     def _execute_handler(self, call: ToolCallSpec) -> ToolResultEvent:
         handler = self.handlers.get(call.tool_name)
@@ -321,8 +319,11 @@ class ToolGateway:
         self,
         call: ToolCallSpec,
         policy_decision: ToolPolicyDecision,
+        approval_decision: ApprovalDecision,
         event_log: EventLog,
     ) -> ToolGatewayResult:
+        event_log.append(approval_decision.to_event())
+
         tool_result = ToolResultEvent(
             call_id=call.call_id,
             tool_name=call.tool_name,
@@ -339,6 +340,7 @@ class ToolGateway:
             observation=None,
             promotion_delta=None,
             revision_event=None,
+            approval_decision=approval_decision,
             approved=False,
         )
 

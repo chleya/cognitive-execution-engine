@@ -12,9 +12,6 @@ from cee_core import (
     ToolResultEvent,
     ToolSpec,
     build_tool_gateway,
-)
-from cee_core.tool_gateway import (
-    ApprovalProvider,
     StaticApprovalProvider,
 )
 
@@ -167,7 +164,7 @@ class TestToolGatewayWriteTool:
         gateway = build_tool_gateway(
             registry,
             handlers={"write_file": lambda args: "ok"},
-            approval_provider=StaticApprovalProvider(verdict=True),
+            approval_provider=StaticApprovalProvider(verdict="approved"),
         )
         log = EventLog()
 
@@ -181,7 +178,7 @@ class TestToolGatewayWriteTool:
         registry = _make_registry_with_write_tool()
         gateway = build_tool_gateway(
             registry,
-            approval_provider=StaticApprovalProvider(verdict=False),
+            approval_provider=StaticApprovalProvider(verdict="rejected"),
         )
         log = EventLog()
 
@@ -209,7 +206,7 @@ class TestToolGatewayExternalTool:
         gateway = build_tool_gateway(
             registry,
             handlers={"send_email": lambda args: "sent"},
-            approval_provider=StaticApprovalProvider(verdict=True),
+            approval_provider=StaticApprovalProvider(verdict="approved"),
         )
         log = EventLog()
 
@@ -395,7 +392,7 @@ class TestBuildToolGateway:
         registry = _make_registry_with_write_tool()
         gateway = build_tool_gateway(
             registry,
-            approval_provider=StaticApprovalProvider(verdict=True),
+            approval_provider=StaticApprovalProvider(verdict="approved"),
         )
         assert gateway.approval_provider is not None
 
