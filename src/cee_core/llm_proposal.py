@@ -53,6 +53,16 @@ FORBIDDEN_LLM_FIELDS: frozenset[str] = frozenset({
     "raw_sql",
     "shell_command",
     "system_command",
+    "consciousness",
+    "personhood",
+    "self_awareness",
+    "sentience",
+    "identity",
+    "free_will",
+    "autonomy",
+    "can_expand_permissions",
+    "can_bypass_policy",
+    "can_self_approve",
 })
 
 VALID_TARGET_KINDS: frozenset[str] = frozenset({
