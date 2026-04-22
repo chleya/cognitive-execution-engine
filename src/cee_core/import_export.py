@@ -160,8 +160,10 @@ class ImportExportManager:
             ws = WorldState.from_dict(package.state)
             self.state_store.save_world_state(ws)
             result["state_restored"] = True
-        
-        result["events_imported"] = len(package.events)
+            
+            if package.events:
+                self.state_store.save_events(package.events)
+                result["events_imported"] = len(package.events)
         
         return result
     

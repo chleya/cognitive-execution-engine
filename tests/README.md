@@ -9,7 +9,7 @@ python -m pytest -q
 Current expected result:
 
 ```text
-218 passed, 2 skipped
+1349 passed, 2 skipped
 ```
 
 ## Coverage Map

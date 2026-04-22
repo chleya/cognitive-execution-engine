@@ -546,6 +546,33 @@ def _process_deltas(
             elif delta.target_kind == "goal_update":
                 revision_kind = "confirmation"
 
+            from .revision_policy import evaluate_revision_policy
+            from .world_state import WorldState
+            rev_policy_decision = evaluate_revision_policy(
+                (delta,), WorldState(state_id=state_id), revision_kind,
+            )
+            if not rev_policy_decision.allowed:
+                event_log.append(Event(
+                    event_type="llm.proposal.revision_policy.rejected",
+                    payload={
+                        "proposal_id": proposal.proposal_id,
+                        "delta_id": delta.delta_id,
+                        "violated_rules": list(rev_policy_decision.violated_rules),
+                    },
+                    actor="llm_proposal_adapter",
+                ))
+                commitments[-1] = CommitmentEvent(
+                    event_id=commitment.event_id,
+                    source_state_id=commitment.source_state_id,
+                    commitment_kind=commitment.commitment_kind,
+                    intent_summary=commitment.intent_summary,
+                    action_summary=commitment.action_summary,
+                    success=False,
+                    reversibility=commitment.reversibility,
+                    requires_approval=commitment.requires_approval,
+                )
+                continue
+
             revision = ModelRevisionEvent(
                 revision_id=f"rev-{commitment.event_id}",
                 prior_state_id=state_id,
@@ -575,9 +602,9 @@ def _process_tool_calls(
             policy_decision = evaluate_tool_call_policy(call, tool_registry)
         else:
             policy_decision = ToolPolicyDecision(
-                verdict="allow",
-                reason="no tool registry configured; defaulting to allow",
-                risk="read",
+                verdict="deny",
+                reason="no tool registry configured; tool calls denied without registry",
+                tool_name=call.tool_name,
             )
 
         approval_decision = None

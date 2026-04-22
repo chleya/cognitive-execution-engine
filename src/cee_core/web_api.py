@@ -591,7 +591,10 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
                     detail=f"Unknown commitment kind: {request.commitment_kind}",
                 )
 
-            policy_decision = evaluate_commitment_policy(request.commitment_kind)
+            policy_decision = evaluate_commitment_policy(
+                request.commitment_kind,
+                reversibility=getattr(request, "reversibility", None),
+            )
             if not policy_decision.allowed:
                 raise HTTPException(
                     status_code=403,
@@ -621,12 +624,15 @@ def create_app(config: Optional[CEEConfig] = None) -> FastAPI:
                     action_summary=request.intent_summary,
                     target_entity_ids=tuple(request.target_entity_ids),
                 )
-            else:
-                ce = make_observation_commitment(
-                    ws,
+            elif request.commitment_kind == "internal_commit":
+                ce = CommitmentEvent(
                     event_id=f"ce-api-{int(time.monotonic()*1000)}",
+                    source_state_id=ws.state_id,
+                    commitment_kind="internal_commit",
                     intent_summary=request.intent_summary,
-                    target_entity_ids=tuple(request.target_entity_ids),
+                    action_summary=request.intent_summary,
+                    success=True,
+                    reversibility="reversible",
                 )
 
             ce = complete_commitment(

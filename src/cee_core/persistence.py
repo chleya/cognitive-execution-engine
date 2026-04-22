@@ -7,9 +7,12 @@ while maintaining determinism and replay semantics.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+_SAFE_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 from .event_log import EventLog
 from .events import Event, DeliberationEvent
@@ -148,6 +151,48 @@ class StateStore:
         revisions = load_revision_events(self)
         return commitments, revisions
 
+    def save_events(self, events: list) -> None:
+        """Append events to the event log file."""
+        from .events import Event
+        from .commitment import CommitmentEvent as CE
+        from .revision import ModelRevisionEvent as MRE
+
+        existing = self.load_events()
+        next_index = len(existing)
+
+        with open(self.events_file, "a", encoding="utf-8") as f:
+            for event in events:
+                if isinstance(event, (CE, MRE)):
+                    entry = EventStoreEntry(
+                        index=next_index,
+                        event_type=getattr(event, "event_type", type(event).__name__),
+                        payload=event.to_dict(),
+                        actor=getattr(event, "actor", "import"),
+                    )
+                elif isinstance(event, Event):
+                    entry = EventStoreEntry(
+                        index=next_index,
+                        event_type=event.event_type,
+                        payload=event.payload,
+                        actor=getattr(event, "actor", "import"),
+                    )
+                elif isinstance(event, dict):
+                    entry = EventStoreEntry(
+                        index=next_index,
+                        event_type=event.get("event_type", "unknown"),
+                        payload=event.get("payload", {}),
+                        actor=event.get("actor", "import"),
+                    )
+                else:
+                    entry = EventStoreEntry(
+                        index=next_index,
+                        event_type=type(event).__name__,
+                        payload={"data": str(event)},
+                        actor="import",
+                    )
+                next_index += 1
+                f.write(json.dumps(entry.to_dict(), default=str) + "\n")
+
     def save_world_state(self, ws: WorldState) -> str:
         """Save WorldState to file. Returns file path."""
         with open(self.world_state_file, "w", encoding="utf-8") as f:
@@ -211,16 +256,25 @@ class StateStore:
 
     def save_run_artifact(self, run_id: str, artifact_data: Dict[str, Any]) -> str:
         """Save a RunArtifact keyed by run_id. Returns file path."""
+        self._validate_run_id(run_id)
         runs_dir = self.storage_dir / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         artifact_file = runs_dir / f"{run_id}.json"
+        resolved = artifact_file.resolve()
+        if not str(resolved).startswith(str(runs_dir.resolve())):
+            raise ValueError(f"run_id resolves outside runs directory: {run_id}")
         with open(artifact_file, "w", encoding="utf-8") as f:
             json.dump(artifact_data, f, indent=2, default=str)
         return str(artifact_file)
 
     def load_run_artifact(self, run_id: str) -> Dict[str, Any] | None:
         """Load a RunArtifact by run_id. Returns None if not found."""
+        self._validate_run_id(run_id)
         artifact_file = self.storage_dir / "runs" / f"{run_id}.json"
+        resolved = artifact_file.resolve()
+        runs_dir = (self.storage_dir / "runs").resolve()
+        if not str(resolved).startswith(str(runs_dir)):
+            raise ValueError(f"run_id resolves outside runs directory: {run_id}")
         if not artifact_file.exists():
             return None
         with open(artifact_file, "r", encoding="utf-8") as f:
@@ -232,6 +286,14 @@ class StateStore:
         if not runs_dir.exists():
             return []
         return [f.stem for f in runs_dir.glob("*.json")]
+
+    @staticmethod
+    def _validate_run_id(run_id: str) -> None:
+        if not _SAFE_RUN_ID_PATTERN.match(run_id):
+            raise ValueError(
+                f"Invalid run_id: {run_id!r}. "
+                "Must match ^[A-Za-z0-9_-]{1,64}$"
+            )
 
 
 def load_world_state_from_file(path: Path) -> WorldState:

@@ -44,7 +44,7 @@ python examples\workflow_demo.py
 Current expected result:
 
 ```text
-1125 passed, 2 skipped
+1349 passed, 2 skipped
 ```
 
 ### CLI Usage

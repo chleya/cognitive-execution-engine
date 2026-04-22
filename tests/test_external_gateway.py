@@ -123,7 +123,7 @@ class TestHTTPGateway:
         config = HTTPGatewayConfig(base_url="https://api.example.com")
         gateway = HTTPGateway(config=config)
 
-        assert gateway._is_domain_allowed("https://any.com/api") is True
+        assert gateway._is_domain_allowed("https://any.com/api") is False
     
     def test_get_stats(self):
         config = HTTPGatewayConfig(base_url="https://api.test.com")
@@ -136,7 +136,10 @@ class TestHTTPGateway:
         assert "error_rate" in stats
     
     def test_request_without_requests_library(self, monkeypatch):
-        config = HTTPGatewayConfig(base_url="https://api.test.com")
+        config = HTTPGatewayConfig(
+            base_url="https://api.test.com",
+            allowed_domains=("api.test.com",),
+        )
         gateway = HTTPGateway(config=config)
         
         import sys

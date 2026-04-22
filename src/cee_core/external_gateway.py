@@ -106,7 +106,7 @@ class HTTPGateway:
     
     def _is_domain_allowed(self, url: str) -> bool:
         if not self.config.allowed_domains:
-            return True
+            return False
 
         parsed = urlparse(url)
         hostname = parsed.hostname

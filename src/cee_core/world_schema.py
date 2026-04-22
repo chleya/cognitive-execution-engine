@@ -13,6 +13,8 @@ from typing import Any, Literal, Tuple
 
 Confidence = float
 
+from .schemas import require_schema_version
+
 WORLD_SCHEMA_VERSION = "cee.world_schema.v1"
 
 
@@ -34,6 +36,7 @@ class WorldEntity:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WorldEntity:
+        require_schema_version(payload, WORLD_SCHEMA_VERSION, required=False)
         return cls(
             entity_id=payload["entity_id"],
             kind=payload["kind"],
@@ -62,6 +65,7 @@ class WorldRelation:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WorldRelation:
+        require_schema_version(payload, WORLD_SCHEMA_VERSION, required=False)
         return cls(
             relation_id=payload["relation_id"],
             subject_id=payload["subject_id"],
@@ -93,6 +97,7 @@ class WorldHypothesis:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WorldHypothesis:
+        require_schema_version(payload, WORLD_SCHEMA_VERSION, required=False)
         return cls(
             hypothesis_id=payload["hypothesis_id"],
             statement=payload["statement"],
@@ -146,6 +151,7 @@ class RevisionDelta:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> RevisionDelta:
+        require_schema_version(payload, WORLD_SCHEMA_VERSION, required=False)
         return cls(
             delta_id=payload["delta_id"],
             target_kind=payload["target_kind"],

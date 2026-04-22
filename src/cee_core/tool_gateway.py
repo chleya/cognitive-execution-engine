@@ -170,6 +170,7 @@ class ToolGateway:
                 external_result_summary=f"Tool {call.tool_name} succeeded",
                 observation_summaries=(f"result from {call.tool_name}",),
             )
+            event_log.append(completed_commitment)
 
             if promote_to_belief_key is not None:
                 promotion_delta = promote_observation_to_delta(
@@ -200,6 +201,7 @@ class ToolGateway:
                 success=False,
                 external_result_summary=tool_result.error_message,
             )
+            event_log.append(completed_commitment)
 
         return ToolGatewayResult(
             call=call,

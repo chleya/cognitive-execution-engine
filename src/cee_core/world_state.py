@@ -59,6 +59,8 @@ class WorldState:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> WorldState:
+        from .schemas import require_schema_version
+        require_schema_version(payload, WORLD_STATE_SCHEMA_VERSION, required=False)
         return cls(
             state_id=payload.get("state_id", "ws_0"),
             parent_state_id=payload.get("parent_state_id"),

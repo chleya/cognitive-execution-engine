@@ -124,7 +124,7 @@ class CEEConfig:
                     "memory", "goals", "beliefs", "self_model",
                     "policy", "domain_data", "tool_affordances", "meta"
                 ]),
-                event_format=policy_data.get("event_format", "dual"),
+                event_format=policy_data.get("event_format", "new"),
             ),
             persistence=PersistenceConfig(
                 storage_dir=persistence_data.get("storage_dir", "cee_storage"),

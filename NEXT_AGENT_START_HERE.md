@@ -9,7 +9,7 @@ Read that first. This file is a human-readable mirror only.
 ## Current State
 
 - Repo: `F:\cognitive-execution-engine`
-- Validation: `python -m pytest -q` -> `1147 passed, 2 skipped`
+- Validation: `python -m pytest -q` -> `1349 passed, 2 skipped`
 - Current architecture includes:
   - `TaskSpec -> ReasoningStep -> PlanSpec` (legacy core, still used internally)
   - `WorldState + CommitmentEvent + ModelRevisionEvent` (primary architecture)
@@ -20,7 +20,7 @@ Read that first. This file is a human-readable mirror only.
   - `RunResult.replayed_state` derived from WorldState via `bridge_world_to_state` (not from StateTransitionEvent replay)
   - `runtime._execute_plan_in_domain` accepts WorldState directly (no State bridging for current_state)
   - `domain_policy.evaluate_patch_policy_in_domain` accepts current_beliefs/current_memory dicts (no State dependency)
-  - `extract_beliefs_and_memory_from_world` in bridge.py extracts dicts from WorldState without creating State
+  - `extract_beliefs_and_memory_from_world` in world_state.py extracts dicts from WorldState
   - `RevisionDelta.raw_value` carries original patch value for lossless replay
   - Only policy-allowed patches generate ModelRevisionEvent
   - `/tasks` endpoint: WorldState as primary state, saves directly, bridges back to legacy
@@ -39,7 +39,7 @@ The project is in **Phase 2 cutover**: WorldState is the primary state represent
 
 - Legacy: `State`, `StatePatch`, `StateTransitionEvent`, `PolicyDecision` (still used internally for policy evaluation)
 - Primary: `WorldState`, `CommitmentEvent`, `ModelRevisionEvent`, `CommitmentPolicyDecision`
-- Bridge: `bridge.py` provides compatible bidirectional conversion (enhanced with raw_value and memory/domain_data round-trip)
+- WorldState is the sole state container (bridge.py removed; State/StatePatch retired)
 - `event_format="new"` is the default; `"dual"` available for compat; `"legacy"` removed
 - `EventLog.replay_state()` is deprecated; use `replay_world_state()` instead
 
@@ -97,7 +97,7 @@ If this file and `handoff_state.json` disagree, `handoff_state.json` wins.
 
 ## Next Task Candidates
 
-1. Remove bridge.py once all consumers use WorldState directly (BRIDGE-REMOVAL-001)
+1. ~~Remove bridge.py~~ DONE - all consumers use WorldState directly
 2. Migrate RunResult.replayed_state from State to WorldState-native (breaking change, needs versioning) (STATE-INTERNALS-002)
 3. Clean up legacy tests that still use State/StatePatch directly (LEGACY-TEST-CLEANUP-001)
 4. Migrate persistence.py StateStore to WorldState-native storage (PERSISTENCE-MIGRATION-001)
@@ -178,10 +178,9 @@ If this file and `handoff_state.json` disagree, `handoff_state.json` wins.
 ## Module Map
 
 ### Legacy Core
-- `state.py`: core state kernel (State, StatePatch, apply_patch, reduce_event, replay) [LEGACY - Phase 2 cutover target]
+- ~~`state.py`~~: REMOVED - WorldState is the sole state container
 - `events.py`: event model (Event, StateTransitionEvent, DeliberationEvent)
 - `event_log.py`: event log (EventLog, replay_transition_events, replay_serialized_transition_events)
-- `policy.py`: policy engine (evaluate_patch_policy, build_transition_for_patch)
 - `audit_policy.py`: audit policy (CompilerAuditPolicy)
 - `approval.py`: human approval (ApprovalDecision, approve_transition, ApprovalGate, ApprovalGateResult, StaticApprovalProvider, CallbackApprovalProvider)
 - `planner.py`: planner (PlanSpec, plan_from_task, execute_plan)
@@ -214,7 +213,7 @@ If this file and `handoff_state.json` disagree, `handoff_state.json` wins.
 ### Domain & Configuration
 - `domain_context.py`: domain context runtime entry (DomainContext, build_domain_context)
 - `domain_plugins.py`: domain plugin contracts (DomainPluginRegistry, DomainPluginPack)
-- `domain_policy.py`: domain policy overrides (evaluate_patch_policy_in_domain)
+- ~~`domain_policy.py`~~: REMOVED - domain policy now handled through domain plugins
 - `config.py`: YAML/JSON configuration with env var overrides (CEEConfig, PersistenceConfig, etc.)
 - `schemas.py`: schema versioning (require_schema_version, SCHEMA_MAJOR_VERSION)
 - `primitives.py`: cognitive primitives (CognitivePrimitive, validate_primitives)
@@ -237,15 +236,13 @@ If this file and `handoff_state.json` disagree, `handoff_state.json` wins.
 
 ### New Architecture (World Model)
 - `world_schema.py`: shared protocol types (WorldEntity, WorldRelation, WorldHypothesis, RevisionDelta) [NEW]
-- `world_state.py`: WorldState with entities, relations, hypotheses, anchored facts [NEW]
-- `commitment.py`: CommitmentEvent with observe/act/tool_contact/internal_commit [NEW]
-- `revision.py`: ModelRevisionEvent with expansion/correction/refinement [NEW]
-- `commitment_policy.py`: commitment policy evaluation (DefaultCommitmentPolicy, evaluate_commitment_policy) [NEW]
-- `revision_policy.py`: revision policy evaluation (DefaultRevisionPolicy, evaluate_revision_policy) [NEW]
-- `simulation.py`: internal simulation engine over WorldState [NEW]
-- `hypothesis_engine.py`: hypothesis generation and ranking from tensions [NEW]
-- `reality_interface.py`: CommitmentEvent <-> tool execution bridge [NEW]
-- `bridge.py`: compatible bidirectional State <-> WorldState conversion [NEW - Phase 1 bridge]
+- `world_state.py`: WorldState with entities, relations, hypotheses, anchored facts [PRIMARY]
+- `commitment_policy.py`: commitment policy evaluation (DefaultCommitmentPolicy, evaluate_commitment_policy)
+- `revision_policy.py`: revision policy evaluation (DefaultRevisionPolicy, evaluate_revision_policy)
+- `llm_proposal.py`: LLM proposal adapters with validation, policy, approval pipeline
+- `memory_promotion.py`: memory promotion pipeline with policy validation
+- `calibration.py`: self-model calibration with forbidden key/value pattern enforcement
+- `tool_gateway.py`: bounded tool execution boundary with policy + approval + audit
 
 ### Specialized Modules
 - `failure_modes.py`: unified failure classification (FailureMode, classify_exception, record_failure)

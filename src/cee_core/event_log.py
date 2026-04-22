@@ -103,13 +103,70 @@ def _apply_revision_to_world_state(
 ) -> WorldState:
     """Apply a single ModelRevisionEvent to a WorldState."""
     import json
-    from .world_state import add_anchor_facts, update_hypothesis_status, update_dominant_goals, update_self_model
+    from .world_schema import WorldEntity, WorldHypothesis
+    from .world_state import (
+        add_anchor_facts,
+        add_entity,
+        add_hypothesis_to_world,
+        update_dominant_goals,
+        update_entity,
+        update_hypothesis_status,
+        update_self_model,
+    )
 
     new_anchors = []
     for delta in rev.deltas:
-        if delta.target_kind in ("hypothesis", "anchored_fact"):
+        if delta.target_kind in ("hypothesis", "anchored_fact", "anchor_add"):
             if delta.after_summary and delta.after_summary not in ws.anchored_fact_summaries:
                 new_anchors.append(delta.after_summary)
+
+        if delta.target_kind in ("hypothesis_update",):
+            if delta.raw_value is not None and isinstance(delta.raw_value, dict):
+                hid = delta.raw_value.get("hypothesis_id", delta.target_ref)
+                new_status = delta.raw_value.get("status", "active")
+                new_confidence = delta.raw_value.get("confidence")
+                existing = ws.find_hypothesis(hid)
+                if existing is not None:
+                    if new_confidence is not None:
+                        ws = update_hypothesis_status(ws, hid, new_status, float(new_confidence),
+                                                      provenance_ref=rev.revision_id)
+                    else:
+                        ws = update_hypothesis_status(ws, hid, new_status,
+                                                      provenance_ref=rev.revision_id)
+                else:
+                    h = WorldHypothesis(
+                        hypothesis_id=hid,
+                        statement=delta.after_summary or delta.raw_value.get("statement", ""),
+                        status=new_status,
+                        confidence=float(new_confidence) if new_confidence is not None else 0.5,
+                    )
+                    ws = add_hypothesis_to_world(ws, h, provenance_ref=rev.revision_id)
+
+        if delta.target_kind in ("hypothesis_remove",):
+            target_ref = delta.target_ref
+            hid = delta.raw_value if isinstance(delta.raw_value, str) else target_ref
+            existing = ws.find_hypothesis(hid)
+            if existing is not None:
+                ws = update_hypothesis_status(ws, hid, "retired",
+                                              provenance_ref=rev.revision_id)
+
+        if delta.target_kind == "hypothesis_add":
+            if delta.raw_value is not None and isinstance(delta.raw_value, dict):
+                h = WorldHypothesis(
+                    hypothesis_id=delta.raw_value.get("hypothesis_id", delta.target_ref),
+                    statement=delta.raw_value.get("statement", delta.after_summary or ""),
+                    status=delta.raw_value.get("status", "tentative"),
+                    confidence=float(delta.raw_value.get("confidence", 0.5)),
+                )
+                ws = add_hypothesis_to_world(ws, h, provenance_ref=rev.revision_id)
+            elif delta.after_summary:
+                h = WorldHypothesis(
+                    hypothesis_id=delta.delta_id,
+                    statement=delta.after_summary,
+                    status="tentative",
+                    confidence=0.5,
+                )
+                ws = add_hypothesis_to_world(ws, h, provenance_ref=rev.revision_id)
 
         if delta.target_kind == "goal_update" and delta.raw_value is not None:
             goals = delta.raw_value
@@ -125,12 +182,10 @@ def _apply_revision_to_world_state(
             elif target_ref == "self_model.reliability" and isinstance(delta.raw_value, (int, float)):
                 ws = update_self_model(ws, reliability_estimate=float(delta.raw_value))
 
-        if delta.target_kind == "entity_update" and delta.raw_value is not None:
+        if delta.target_kind in ("entity_add", "entity_update") and delta.raw_value is not None:
             target_ref = delta.target_ref
             if target_ref.startswith("beliefs."):
                 key = target_ref[len("beliefs."):]
-                from .world_schema import WorldEntity
-                from .world_state import add_entity, update_entity
                 existing = ws.find_entity(f"belief-{key}")
                 if isinstance(delta.raw_value, str):
                     summary = f"{key} = {delta.raw_value}"
@@ -148,8 +203,6 @@ def _apply_revision_to_world_state(
                     ))
             elif target_ref.startswith("domain_data."):
                 key = target_ref[len("domain_data."):]
-                from .world_schema import WorldEntity
-                from .world_state import add_entity, update_entity
                 existing = ws.find_entity(f"domain-{key}")
                 summary = json.dumps(delta.raw_value, default=str)
                 if existing:
@@ -162,8 +215,6 @@ def _apply_revision_to_world_state(
                     ))
             elif target_ref.startswith("memory."):
                 key = target_ref[len("memory."):]
-                from .world_schema import WorldEntity
-                from .world_state import add_entity, update_entity
                 existing = ws.find_entity(f"memory-{key}")
                 if existing:
                     try:
@@ -185,6 +236,15 @@ def _apply_revision_to_world_state(
                         kind="memory_entry",
                         summary=json.dumps(value, default=str),
                     ))
+
+        if delta.target_kind == "entity_remove":
+            pass
+
+        if delta.target_kind in ("relation_add", "relation_update", "relation_remove"):
+            pass
+
+        if delta.target_kind == "tension_update":
+            pass
 
     if new_anchors:
         ws = add_anchor_facts(ws, tuple(new_anchors))

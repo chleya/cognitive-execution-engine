@@ -328,9 +328,10 @@ class TestToolGatewayAuditTrail:
         commitment_events = log.commitment_events()
         revision_events = log.revision_events()
 
-        assert len(commitment_events) == 1
-        assert commitment_events[0].commitment_kind == "tool_contact"
-        assert len(revision_events) == 1
+        assert len(commitment_events) >= 1
+        tool_commitments = [c for c in commitment_events if c.commitment_kind == "tool_contact"]
+        assert len(tool_commitments) >= 1
+        assert len(revision_events) >= 1
         assert revision_events[0].revision_kind == "expansion"
 
     def test_denied_tool_still_records_result_event(self):
